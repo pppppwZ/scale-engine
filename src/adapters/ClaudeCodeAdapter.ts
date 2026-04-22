@@ -13,7 +13,8 @@ import { logger } from '../core/logger.js'
 export interface AdapterConfig {
   projectDir: string
   scaleDir?: string
-  agentType?: 'claude-code' | 'codex' | 'opencode' | 'cursor' | 'gemini'
+  agentType?: 'claude-code' | 'codex' | 'opencode' | 'cursor' | 'gemini' | 'openclaw' | 'hermes'
+  scenarioMode?: 'sandbox' | 'standard' | 'critical'
 }
 
 export interface HookEntry {
@@ -233,21 +234,6 @@ hooks/*.sh
 }
 
 // ============================================================================
-// Adapter Factory
+// Adapter Factory — moved to ./index.ts
 // ============================================================================
-
-import { CodexAdapter } from './CodexAdapter.js'
-
-// ...existing code...
-
-export function createAdapter(agentType: string): IAgentAdapter {
-  switch (agentType) {
-    case 'claude-code':
-      return new ClaudeCodeAdapter()
-    case 'codex':
-      return new CodexAdapter()
-    default:
-      throw new Error(`Unsupported agent type: ${agentType}. Supported: claude-code, codex`)
-  }
-}
 

@@ -401,10 +401,11 @@ export interface GuardFailure {
 
 export interface Session {
   id: SessionId
-  agent: 'claude-code' | 'codex' | 'cursor' | 'gemini' | 'opencode' | 'unknown'
+  agent: AgentPlatform | 'unknown'
   startedAt: Timestamp
   endedAt?: Timestamp
   activeRole?: string
+  scenarioMode?: ScenarioMode
   metadata: Record<string, unknown>
 }
 
@@ -532,4 +533,102 @@ export class ArtifactNotFoundError extends ScaleError {
     super(`Artifact '${id}' not found`, 'ARTIFACT_NOT_FOUND', { id })
   }
 }
+
+// ============================================================================
+// 12. Scenario Mode 类型
+// ============================================================================
+
+/** 场景模式：控制检测器敏感度、上下文规则、权限级别 */
+export type ScenarioMode = 'sandbox' | 'standard' | 'critical'
+
+/** 场景模式配置 */
+export interface ScenarioModeConfig {
+  mode: ScenarioMode
+  detectorSensitivity: 'low' | 'medium' | 'high'
+  verificationRequired: boolean
+  humanConfirmationRequired: boolean
+  auditTrail: boolean
+  maxRetries: number
+}
+
+/** 场景模式预设配置 */
+export const SCENARIO_MODE_CONFIGS: Record<ScenarioMode, ScenarioModeConfig> = {
+  sandbox: {
+    mode: 'sandbox',
+    detectorSensitivity: 'low',
+    verificationRequired: false,
+    humanConfirmationRequired: false,
+    auditTrail: false,
+    maxRetries: 10,
+  },
+  standard: {
+    mode: 'standard',
+    detectorSensitivity: 'medium',
+    verificationRequired: true,
+    humanConfirmationRequired: false,
+    auditTrail: true,
+    maxRetries: 5,
+  },
+  critical: {
+    mode: 'critical',
+    detectorSensitivity: 'high',
+    verificationRequired: true,
+    humanConfirmationRequired: true,
+    auditTrail: true,
+    maxRetries: 3,
+  },
+}
+
+// ============================================================================
+// 13. Skill Ecosystem 类型
+// ============================================================================
+
+/** Agent 平台类型 */
+export type AgentPlatform = 'claude-code' | 'codex' | 'opencode' | 'cursor' | 'gemini' | 'openclaw' | 'hermes'
+
+/** Skill 引用 */
+export interface SkillRef {
+  id: string
+  name: string
+  description: string
+  platform: AgentPlatform
+  path: string
+  enabled: boolean
+}
+
+/** Skill 目录扫描结果 */
+export interface SkillScanResult {
+  platform: AgentPlatform
+  skillsDir: string
+  skills: SkillRef[]
+  exists: boolean
+}
+
+// ============================================================================
+// 14. Workflow Preset 类型
+// ============================================================================
+
+/** 工作流步骤 */
+export interface WorkflowStep {
+  stepId: string
+  skillId?: string
+  action: string
+  verificationGate?: string
+  isMandatory: boolean
+  description?: string
+}
+
+/** 工作流预设 */
+export interface WorkflowPreset {
+  id: string
+  name: string
+  nameZh: string
+  description: string
+  steps: WorkflowStep[]
+  scenarioMode: ScenarioMode
+  requiredArtifacts: Array<{ type: ArtifactType; status?: string }>
+}
+
+/** Agent 类型扩展（支持所有 7 种 Agent） */
+export type AgentType = AgentPlatform
 

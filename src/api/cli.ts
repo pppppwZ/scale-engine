@@ -12,9 +12,11 @@ import { BruteRetryDetector, PrematureDoneDetector, BlameShiftDetector } from '.
 import { DangerousCommandDetector, SecretLeakDetector, RoleGateDetector, BUILT_IN_ROLES } from '../guardrails/advancedDetectors.js'
 import { KnowledgeBase } from '../knowledge/KnowledgeBase.js'
 import { ContextBuilder } from '../context/ContextBuilder.js'
-import { createAdapter } from '../adapters/ClaudeCodeAdapter.js'
+import { createAdapter, SUPPORTED_AGENTS } from '../adapters/index.js'
 import { LessonExtractor, RuleProposer, HookGenerator, EvolutionEngine } from '../evolution/EvolutionEngine.js'
 import { Doctor } from './doctor.js'
+import { SkillDiscovery } from '../skills/SkillDiscovery.js'
+import { listWorkflowPresets, getPresetsByScenario } from '../workflows/presets.js'
 import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -637,13 +639,14 @@ const stats = defineCommand({
 const init = defineCommand({
   meta: { name: 'init', description: 'Initialize SCALE Engine in current project' },
   args: {
-    agent: { type: 'string', default: 'claude-code', description: 'Agent type (claude-code)' },
+    agent: { type: 'string', default: 'claude-code', description: `Agent type (${SUPPORTED_AGENTS.join('/')})` },
     dir: { type: 'string', default: '.', description: 'Project directory' },
+    scenario: { type: 'string', default: 'standard', description: 'Scenario mode (sandbox/standard/critical)' },
   },
   async run({ args }) {
     const adapter = createAdapter(args.agent)
-    const result = await adapter.init({ projectDir: args.dir, agentType: args.agent as 'claude-code' })
-    console.log(`\n✅ SCALE Engine initialized for ${args.agent}`)
+    const result = await adapter.init({ projectDir: args.dir, agentType: args.agent as never, scenarioMode: args.scenario as 'sandbox' | 'standard' | 'critical' })
+    console.log(`\n✅ SCALE Engine initialized for ${args.agent} (scenario: ${args.scenario})`)
     console.log(`\n📁 Created:`)
     for (const f of result.created) console.log(`   + ${f}`)
     if (result.skipped.length > 0) {
@@ -697,11 +700,102 @@ const doctor = defineCommand({
 })
 
 // ============================================================================
+// workflow command — 列出/查看工作流预设
+// ============================================================================
+
+const workflowList = defineCommand({
+  meta: { name: 'list', description: 'List all workflow presets' },
+  args: {
+    scenario: { type: 'string', description: 'Filter by scenario mode (sandbox/standard/critical)' },
+  },
+  async run({ args }) {
+    const presets = args.scenario
+      ? getPresetsByScenario(args.scenario as 'sandbox' | 'standard' | 'critical')
+      : listWorkflowPresets()
+
+    if (presets.length === 0) {
+      console.log('No workflow presets found.')
+      return
+    }
+
+    console.log('\n📋 SCALE Engine Workflow Presets')
+    console.log('═══════════════════════════════════════════════════════')
+
+    for (const preset of presets) {
+      const modeEmoji = { sandbox: '🏖️', standard: '⚙️', critical: '🔒' }[preset.scenarioMode]
+      const mandatorySteps = preset.steps.filter((s) => s.isMandatory).length
+      const totalSteps = preset.steps.length
+
+      console.log(`\n  ${preset.nameZh} (${preset.id})`)
+      console.log(`  ${preset.description}`)
+      console.log(`  Mode: ${modeEmoji} ${preset.scenarioMode} · Steps: ${mandatorySteps}/${totalSteps} mandatory`)
+
+      if (preset.requiredArtifacts.length > 0) {
+        console.log(`  Requires: ${preset.requiredArtifacts.map((a) => `${a.type}${a.status ? `(${a.status})` : ''}`).join(', ')}`)
+      }
+
+      // Show step summary
+      for (const step of preset.steps) {
+        const marker = step.isMandatory ? '●' : '○'
+        const gate = step.verificationGate ? ` ⊓ ${step.verificationGate}` : ''
+        console.log(`    ${marker} ${step.stepId}: ${step.action}${gate}`)
+      }
+    }
+
+    console.log('\n═══════════════════════════════════════════════════════')
+    console.log('\nUsage: scale workflow show <preset-id>')
+  },
+})
+
+const workflow = defineCommand({
+  meta: { name: 'workflow', description: 'Workflow preset management' },
+  subCommands: { list: workflowList },
+})
+
+// ============================================================================
+// skill command — 技能发现
+// ============================================================================
+
+const skillScan = defineCommand({
+  meta: { name: 'scan', description: 'Scan for installed skills' },
+  args: {
+    dir: { type: 'string', default: '.', description: 'Project directory' },
+  },
+  async run({ args }) {
+    const discovery = new SkillDiscovery(args.dir)
+    const result = discovery.discover()
+
+    if (!result.platform) {
+      console.log('\n⚠️  No agent platform detected. Run `scale init` first.')
+      return
+    }
+
+    console.log(`\n🔍 Platform: ${result.platform}`)
+    console.log(`📦 Skills found: ${result.skills.length}`)
+
+    if (result.skills.length > 0) {
+      for (const skill of result.skills) {
+        const status = skill.enabled ? '✅' : '❌'
+        const desc = skill.description ? ` — ${skill.description}` : ''
+        console.log(`  ${status} ${skill.name}${desc}`)
+      }
+    } else {
+      console.log('  No skills found in platform skills directory.')
+    }
+  },
+})
+
+const skill = defineCommand({
+  meta: { name: 'skill', description: 'Skill discovery and management' },
+  subCommands: { scan: skillScan },
+})
+
+// ============================================================================
 // Main
 // ============================================================================
 
 const main = defineCommand({
-  meta: { name: 'scale', version: '0.4.0', description: 'SCALE Engine CLI — AI engineering scaffold' },
+  meta: { name: 'scale', version: '0.5.0', description: 'SCALE Engine v0.5.0 CLI — AI engineering scaffold · 7 agents · 10 workflows · 8 detectors' },
   subCommands: {
     init,
     doctor,
@@ -717,6 +811,8 @@ const main = defineCommand({
     context,
     evolve,
     stats,
+    workflow,
+    skill,
     'create-prd': createPRD,
   },
 })

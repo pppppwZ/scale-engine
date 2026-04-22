@@ -1,5 +1,51 @@
 # @hongmaple0820/scale-engine CHANGELOG
 
+## 0.5.0 - 2026-04-22
+
+### 重大更新：7 Agent 适配器 + 场景模式 + 工作流预设 + 技能生态
+
+**新增功能：**
+
+- **7 种 Agent 适配器**：新增 OpenCode, Cursor, Gemini, OpenClaw, Hermes 适配器
+  - 统一 `createAdapter()` 工厂函数
+  - `SUPPORTED_AGENTS` 常量导出
+  - `src/adapters/index.ts` 统一入口
+- **3 种场景模式**：Sandbox / Standard / Critical
+  - 不同检测器敏感度 (low/medium/high)
+  - 不同验证要求、人工确认要求、最大重试次数
+  - `ScenarioModeConfig` 类型 + `SCENARIO_MODE_CONFIGS` 预设
+- **10 种工作流预设**：`src/workflows/presets.ts`
+  - 基础开发流、TDD功能开发、Bug修复、SDD、代码审查
+  - 安全审计、Ralph自主循环、快速原型、大规模重构、并行执行
+  - `scale workflow list` CLI 命令
+- **技能生态系统**：`src/skills/SkillDiscovery.ts`
+  - 自动检测 Agent 平台
+  - 扫描技能目录
+  - 生成 skills.md
+  - `scale skill scan` CLI 命令
+- **SCALE v10.0 哲学**：ContextBuilder P1 系统规则层
+  - v5.0 × v8.0 × v9.1 核心认知框架
+  - 物理约束 (不可绕过)
+  - 场景模式上下文注入
+- **CLI 增强**：
+  - `scale init --scenario <mode>` 场景模式选择
+  - `scale workflow list [--scenario <mode>]` 工作流列表
+  - `scale skill scan` 技能发现
+  - 版本号 0.5.0
+- **类型系统扩展**：
+  - `AgentPlatform` 类型 (7 种)
+  - `ScenarioMode` + `ScenarioModeConfig`
+  - `SkillRef` + `SkillScanResult`
+  - `WorkflowPreset` + `WorkflowStep`
+
+### 改进
+
+- ContextBuilder 导入修复：移除无效的 `ScenarioModeConfig` 类型导入
+- 统一适配器导出：从 `ClaudeCodeAdapter` 改为 `adapters/index.ts`
+- 完善公共 API 导出
+
+## 0.4.0 - 2026-04-22
+
 ## 0.3.0 - 2026-04-21
 
 ### 新功能

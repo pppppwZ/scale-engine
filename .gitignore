@@ -10,3 +10,4 @@ dist/
 !.scale/config.yaml
 .env
 .env.local
+scale-engine-compare
