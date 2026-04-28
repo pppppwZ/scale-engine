@@ -1,13 +1,14 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.5.1-orange?style=flat-square" alt="version" />
+  <img src="https://img.shields.io/badge/version-0.6.0-orange?style=flat-square" alt="version" />
   <img src="https://img.shields.io/badge/agents-7-blue?style=flat-square" alt="agents" />
   <img src="https://img.shields.io/badge/workflows-10-green?style=flat-square" alt="workflows" />
   <img src="https://img.shields.io/badge/detectors-9-red?style=flat-square" alt="detectors" />
+  <img src="https://img.shields.io/badge/tests-197-passing-brightgreen?style=flat-square" alt="tests" />
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="license" />
-  <img src="https://img.shields.io/badge/npm-0.5.1-cb3837?style=flat-square&logo=npm" alt="npm" />
+  <img src="https://img.shields.io/badge/npm-0.6.0-cb3837?style=flat-square&logo=npm" alt="npm" />
 </p>
 
-# SCALE Engine v0.5.1
+# SCALE Engine v0.6.0
 
 > **S**caffold · **C**ontrol · **A**rtifact · **L**earn · **E**volve
 >
@@ -97,7 +98,7 @@ SCALE Engine 通过 **六层架构** 实现 AI 工程化：
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    SCALE Engine v0.5.1                          │
+│                    SCALE Engine v0.6.0                          │
 │                                                                 │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │  L6 Evolution — 自进化层                                  │  │
@@ -286,8 +287,10 @@ DEFAULT_MODELS = {
 
 ### L5 Memory — 知识记忆层
 
-**KnowledgeBase**：
+**KnowledgeBase**（双引擎）：
 
+- **InMemory** — 内存版，适合开发/测试
+- **SQLiteKnowledgeBase** — 持久化版，基于 better-sqlite3 + drizzle-orm，WAL 模式
 - 支持按标签、类型、相关性召回
 - 向量相似度检索（预留 embedding 接口）
 - 衰减算法：知识条目随时间衰减 `relevance`，被访问后提升
@@ -677,7 +680,12 @@ console.log('生成的配置文件:', initResult.files)
 | `BusyLoopDetector` | Class | 忙碌假象检测器 |
 | `PrematureDoneDetector` | Class | 声称完成但未验证检测器 |
 | `BlameShiftDetector` | Class | 甩锅检测器 |
-| `ROLES` | Constant | 内置角色定义 |
+| `DangerousCommandDetector` | Class | 危险命令拦截器（rm -rf / DROP TABLE 等） |
+| `SecretLeakDetector` | Class | 密钥泄露拦截器（AWS Key / GitHub PAT 等） |
+| `RoleGateDetector` | Class | 角色权限拦截器（4 种内置角色） |
+| `ScopeCreepDetector` | Class | 范围蔓延检测器（第 9 个） |
+| `BUILT_IN_ROLES` | Constant | 内置角色定义（含工具权限矩阵） |
+| `ROLES` | Constant | 角色常量 |
 | `getRole` | Function | 获取角色 |
 | `listRoles` | Function | 列出所有角色 |
 
@@ -709,7 +717,9 @@ console.log('生成的配置文件:', initResult.files)
 
 | 导出 | 类型 | 说明 |
 |------|------|------|
-| `KnowledgeBase` | Class | 知识库（标签/向量召回 + 衰减算法） |
+| `KnowledgeBase` | Class | 内存知识库（标签/向量召回 + 衰减算法） |
+| `SQLiteKnowledgeBase` | Class | SQLite 持久化知识库（WAL 模式 + 并发安全） |
+| `IKnowledgeBase` | Interface | 知识库统一接口 |
 
 ### 进化 (Evolution)
 
@@ -814,6 +824,24 @@ console.log('生成的配置文件:', initResult.files)
 ---
 
 ## 📋 CHANGELOG
+
+### v0.6.0 (2026-04-29)
+
+**新增功能：**
+- ✨ **SQLiteKnowledgeBase** — 基于 better-sqlite3 的持久化知识库，WAL 模式，并发安全
+- ✨ **FSM 并发锁** — per-artifact Promise 链式锁，防止竞态条件
+- ✨ **ScopeCreepDetector** — 第 9 个检测器，检测任务范围蔓延（15 文件 / 10 分钟窗口）
+
+**改进：**
+- CLI 默认使用 SQLiteKnowledgeBase（替代内存版）
+- CLI 注册 ScopeCreepDetector 为 preTool 检测器
+- 公共 API 新增导出：`SQLiteKnowledgeBase`, `IKnowledgeBase`, `DangerousCommandDetector`, `SecretLeakDetector`, `RoleGateDetector`, `ScopeCreepDetector`, `BUILT_IN_ROLES`
+- package.json 添加 `exports` 字段，支持现代 Node.js 模块解析
+
+**测试：**
+- 新增 28 个测试（SQLite KB 19 + FSM 并发锁 4 + ScopeCreep 5）
+- 修复 9 个预存测试失败（import 路径、断言值、FSM guard payload、Gateway warn 语义）
+- 测试套件：197/197 全部通过
 
 ### v0.5.1 (2026-04-22)
 
