@@ -1,12 +1,9 @@
 // SCALE Engine — Agent System Interface
 // Purpose: Define contracts for subagent delegation
 
-import type { ArtifactId } from '../artifact/types'
-import type { Token } from '../core/container'
+import type { ArtifactId } from '../artifact/types.js'
+import type { Token } from '../core/container.js'
 
-/**
- * Capability that an agent provides
- */
 export interface AgentCapability {
   name: string
   description: string
@@ -14,9 +11,6 @@ export interface AgentCapability {
   outputs: string[]
 }
 
-/**
- * Task context for agent dispatch
- */
 export interface AgentTaskContext {
   sessionId: string
   parentArtifactId?: ArtifactId
@@ -26,9 +20,6 @@ export interface AgentTaskContext {
   constraints?: Record<string, unknown>
 }
 
-/**
- * Result from agent execution
- */
 export interface AgentResult {
   success: boolean
   output?: string
@@ -39,9 +30,6 @@ export interface AgentResult {
   tokensUsed?: number
 }
 
-/**
- * Agent definition for registration
- */
 export interface AgentDefinition {
   id: string
   name: string
@@ -56,9 +44,6 @@ export interface AgentDefinition {
   priority: number
 }
 
-/**
- * Agent interface for execution
- */
 export interface IAgent {
   readonly definition: AgentDefinition
   execute(context: AgentTaskContext): Promise<AgentResult>
@@ -66,9 +51,6 @@ export interface IAgent {
   getConfidence(userInput: string): number
 }
 
-/**
- * Agent manager interface
- */
 export interface IAgentManager {
   register(definition: AgentDefinition, implementation?: IAgent): void
   dispatch(context: AgentTaskContext): Promise<AgentResult>
@@ -78,7 +60,4 @@ export interface IAgentManager {
   hasHandler(userInput: string): boolean
 }
 
-/**
- * Token for DI container
- */
 export const AGENT_MANAGER_TOKEN = Symbol('AgentManager') as Token<IAgentManager>

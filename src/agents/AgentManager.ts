@@ -7,20 +7,17 @@ import type {
   AgentDefinition,
   AgentTaskContext,
   AgentResult,
-} from './IAgent'
-import { AGENT_MANAGER_TOKEN } from './IAgent'
-import { container, createToken } from '../core/container'
-import { logger } from '../core/logger'
+} from './IAgent.js'
+import { AGENT_MANAGER_TOKEN } from './IAgent.js'
+import { container } from '../core/container.js'
+import { logger } from '../core/logger.js'
 
-/**
- * Default agent implementation that delegates to Agent tool
- */
 class DefaultAgent implements IAgent {
   constructor(readonly definition: AgentDefinition) {}
 
   canHandle(userInput: string): boolean {
     const lower = userInput.toLowerCase()
-    return this.definition.triggers.some(t => lower.includes(t.toLowerCase()))
+    return this.definition.triggers.some((t: string) => lower.includes(t.toLowerCase()))
   }
 
   getConfidence(userInput: string): number {
@@ -34,22 +31,16 @@ class DefaultAgent implements IAgent {
 
   async execute(context: AgentTaskContext): Promise<AgentResult> {
     const start = Date.now()
-    logger.info(`Agent ${this.definition.id} executing: ${context.userInput.slice(0, 50)}...`)
-
-    // In real implementation, this would invoke the Agent tool
-    // For now, return a placeholder result
+    logger.info('Agent ' + this.definition.id + ' executing: ' + context.userInput.slice(0, 50))
     return {
       success: true,
-      output: `Agent ${this.definition.name} processed task`,
+      output: 'Agent ' + this.definition.name + ' processed task',
       durationMs: Date.now() - start,
       modelUsed: this.definition.modelPreference,
     }
   }
 }
 
-/**
- * Agent Manager - Central registry and dispatcher
- */
 export class AgentManager implements IAgentManager {
   private agents: Map<string, IAgent> = new Map()
   private definitions: Map<string, AgentDefinition> = new Map()
@@ -58,7 +49,7 @@ export class AgentManager implements IAgentManager {
     const agent = implementation ?? new DefaultAgent(definition)
     this.agents.set(definition.id, agent)
     this.definitions.set(definition.id, definition)
-    logger.debug(`Registered agent: ${definition.id} (${definition.name})`)
+    logger.debug('Registered agent: ' + definition.id + ' (' + definition.name + ')')
   }
 
   findBestAgent(userInput: string): AgentDefinition | null {
@@ -69,16 +60,12 @@ export class AgentManager implements IAgentManager {
       if (!agent) continue
 
       if (agent.canHandle(userInput)) {
-        candidates.push({
-          def,
-          confidence: agent.getConfidence(userInput),
-        })
+        candidates.push({ def, confidence: agent.getConfidence(userInput) })
       }
     }
 
     if (candidates.length === 0) return null
 
-    // Sort by priority (higher first) then confidence
     candidates.sort((a, b) => {
       if (a.def.priority !== b.def.priority) return b.def.priority - a.def.priority
       return b.confidence - a.confidence
@@ -90,43 +77,22 @@ export class AgentManager implements IAgentManager {
   async dispatch(context: AgentTaskContext): Promise<AgentResult> {
     const best = this.findBestAgent(context.userInput)
     if (!best) {
-      return {
-        success: false,
-        error: 'No agent available for this task',
-        durationMs: 0,
-        modelUsed: 'none',
-      }
+      return { success: false, error: 'No agent available', durationMs: 0, modelUsed: 'none' }
     }
 
     const agent = this.agents.get(best.id)
     if (!agent) {
-      return {
-        success: false,
-        error: `Agent ${best.id} not registered`,
-        durationMs: 0,
-        modelUsed: 'none',
-      }
+      return { success: false, error: 'Agent ' + best.id + ' not registered', durationMs: 0, modelUsed: 'none' }
     }
 
     return agent.execute(context)
   }
 
-  listAll(): AgentDefinition[] {
-    return Array.from(this.definitions.values())
-  }
-
-  getById(id: string): IAgent | undefined {
-    return this.agents.get(id)
-  }
-
-  hasHandler(userInput: string): boolean {
-    return this.findBestAgent(userInput) !== null
-  }
+  listAll(): AgentDefinition[] { return Array.from(this.definitions.values()) }
+  getById(id: string): IAgent | undefined { return this.agents.get(id) }
+  hasHandler(userInput: string): boolean { return this.findBestAgent(userInput) !== null }
 }
 
-/**
- * Register AgentManager in container
- */
 export function initializeAgentManager(): AgentManager {
   const manager = new AgentManager()
   container.registerInstance(AGENT_MANAGER_TOKEN, manager)

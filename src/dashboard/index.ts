@@ -1,3 +1,2 @@
-// SCALE Engine — Dashboard Entry Point
-
-export { DashboardServer, DashboardConfig, DashboardData } from './server.js'
+export { DashboardServer } from './server.js'
+export type { DashboardConfig, DashboardData } from './server.js'

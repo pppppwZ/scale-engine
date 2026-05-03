@@ -4,7 +4,7 @@
 import type { IArtifactStore } from '../artifact/store.js'
 import type { IKnowledgeBase } from '../knowledge/KnowledgeBase.js'
 import type { IEventBus } from '../core/eventBus.js'
-import type { ArtifactId } from '../artifact/types.js'
+import type { ArtifactId, ArtifactType } from '../artifact/types.js'
 import { logger } from '../core/logger.js'
 
 export interface Pattern {
@@ -77,9 +77,10 @@ export class PatternExtractor implements IPatternExtractor {
   }
 
   async extractFromSession(sessionId: string): Promise<Pattern[]> {
-    const artifacts = await this.store.query({ sessionId })
+    const artifacts = await this.store.query({})
+    const sessionArtifacts = artifacts.filter(a => (a.payload as any).sessionId === sessionId)
     const patterns: Pattern[] = []
-    for (const a of artifacts.filter(a => a.status === 'DONE')) {
+    for (const a of sessionArtifacts.filter(a => a.status === 'DONE')) {
       const p = await this.extractFromArtifact(a.id)
       if (p) patterns.push(p)
     }
@@ -87,10 +88,13 @@ export class PatternExtractor implements IPatternExtractor {
   }
 
   async validatePattern(pattern: Pattern): Promise<boolean> {
-    const artifacts = await this.store.query({ type: pattern.contexts[0] ?? 'Task' })
-    const similar = artifacts.filter(a => a.status === 'DONE')
+    const artifacts = await this.store.query({})
+    const similar = artifacts.filter(a => a.status === 'DONE' && a.type === (pattern.contexts[0] as ArtifactType))
     pattern.successRate = similar.length > 0 ? similar.length / artifacts.length : 0
     pattern.verified = pattern.successRate >= 0.7
+    if (pattern.verified) {
+      this.eventBus.emit('pattern.verified', { patternId: pattern.id, successRate: pattern.successRate })
+    }
     return pattern.verified
   }
 

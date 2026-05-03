@@ -62,9 +62,6 @@ export class SkillCreator implements ISkillCreator {
   async proposeToUser(skill: SkillProposal): Promise<boolean> {
     skill.status = 'proposed'
     this.eventBus.emit('skill.proposed', { skillId: skill.id, name: skill.name })
-    
-    // In real implementation, this would wait for user approval
-    // For now, log the proposal
     logger.info({ skillId: skill.id }, 'Skill proposed for user approval')
     return true
   }
@@ -92,8 +89,6 @@ export class SkillCreator implements ISkillCreator {
   getProposals(): SkillProposal[] {
     return Array.from(this.proposals.values())
   }
-
-  // Private helpers
 
   private skillNameFromPattern(pattern: Pattern): string {
     return pattern.name.replace(' Pattern', '').replace(' Workflow', '')
