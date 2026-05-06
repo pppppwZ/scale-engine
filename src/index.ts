@@ -1,4 +1,4 @@
-// SCALE Engine v0.5.0 — Public API
+// SCALE Engine v0.7.0 — Public API
 // S · C · A · L · E: Scaffold · Control · Artifact · Learn · Evolve
 
 // Core types
@@ -6,6 +6,10 @@ export * from './artifact/types.js'
 
 // FSM
 export { FSM, SpecFSM } from './artifact/fsm.js'
+
+// FSM Agent Bridge (v0.7.0)
+export { FSMAgentBridge } from './fsm/FSMAgentBridge.js'
+export type { IFSMAgentBridge, FSMContextSnapshot } from './fsm/FSMAgentBridge.js'
 
 // Artifact Store
 export { InMemoryArtifactStore } from './artifact/store.js'
@@ -27,7 +31,32 @@ export type { IKnowledgeBase } from './knowledge/KnowledgeBase.js'
 
 // Evolution
 export { BehaviorTracker } from './evolution/BehaviorTracker.js'
+export type { IBehaviorTracker, SessionMetrics, AutoEvolveConfig } from './evolution/BehaviorTracker.js'
 export { LessonExtractor, RuleProposer, HookGenerator, EvolutionEngine } from './evolution/EvolutionEngine.js'
+export { LessonValidator } from './evolution/LessonValidator.js'
+export type { ILessonValidator, ValidationResult, GateResult } from './evolution/LessonValidator.js'
+export { EvolutionEvaluator } from './evolution/EvolutionEvaluator.js'
+export type { IEvolutionEvaluator, EvolutionMetrics, EvolutionSnapshot } from './evolution/EvolutionEvaluator.js'
+export { AutoDefectCreator } from './evolution/AutoDefectCreator.js'
+export type { IAutoDefectCreator, DefectPayload } from './evolution/AutoDefectCreator.js'
+
+// Skills System (v0.7.0)
+export { SkillRegistry } from './skills/SkillRegistry.js'
+export type { ISkillRegistry, SkillDefinition, SkillRecommendation } from './skills/SkillRegistry.js'
+export { TriggerEngine } from './skills/TriggerEngine.js'
+export { SkillExecutor } from './skills/SkillExecutor.js'
+export type { ISkillExecutor } from './skills/SkillExecutor.js'
+export { SkillDiscovery } from './skills/SkillDiscovery.js'
+
+// Hooks System (v0.7.0)
+export { HookGeneratorEnhanced, HookDeployer } from './hooks/index.js'
+export type { HookTemplate, EnhancedHook, IHookGeneratorEnhanced, DeploymentResult, DeploymentStatus, IHookDeployer } from './hooks/index.js'
+
+// Workflows (v0.7.0)
+export { WorkflowExecutor } from './workflows/WorkflowExecutor.js'
+export type { IWorkflowExecutor, WorkflowSession } from './workflows/WorkflowExecutor.js'
+export { GateParser } from './workflows/GateParser.js'
+export type { IGateParser, GateExpression } from './workflows/GateParser.js'
 
 // Guardrails
 export { Gateway } from './guardrails/Gateway.js'
@@ -40,6 +69,23 @@ export {
   DangerousCommandDetector, SecretLeakDetector, RoleGateDetector, ScopeCreepDetector,
   BUILT_IN_ROLES,
 } from './guardrails/advancedDetectors.js'
+export {
+  DetectorStatisticsTracker,
+  DetectorRegistry,
+  AISlopDetector,
+  HallucinationDetector,
+  DuplicateEditDetector,
+  EnhancedGatewayContext,
+  ALL_ENHANCED_DETECTORS,
+} from './guardrails/DetectorEnhanced.js'
+export type {
+  IDetectorStatisticsTracker,
+  DetectorTriggerRecord,
+  DetectorStatistics,
+  DetectorConfig,
+  IDetectorRegistry,
+  IEnhancedGateway,
+} from './guardrails/DetectorEnhanced.js'
 
 // Context
 export { ContextBuilder } from './context/ContextBuilder.js'
@@ -68,9 +114,6 @@ export {
 } from './adapters/index.js'
 export type { IAgentAdapter, AdapterConfig, InitResult, SettingsJson, HookEntry } from './adapters/ClaudeCodeAdapter.js'
 
-// Skill Discovery
-export { SkillDiscovery } from './skills/SkillDiscovery.js'
-
 // Workflow Presets
 export {
   WORKFLOW_PRESETS,
@@ -92,3 +135,7 @@ export {
 // API
 export { Doctor } from './api/doctor.js'
 export { ScaleMCPServer } from './api/mcp.js'
+
+// Dashboard (v0.7.0)
+export { DashboardServer } from './dashboard/DashboardServer.js'
+export type { DashboardState, ArtifactTreeNode, GateSummary, DetectorStatSummary, RecentEvent } from './dashboard/DashboardServer.js'

@@ -88,7 +88,7 @@ export class ClaudeCodeAdapter implements IAgentAdapter {
     return {
       hooks: {
         SessionStart: [
-          { matcher: '', command: 'scale session start --agent claude-code --session-id $CLAUDE_SESSION_ID' },
+          { matcher: '', command: 'scale context inject --session-id $CLAUDE_SESSION_ID' },
         ],
         PreToolUse: [
           { matcher: 'Bash', command: 'scale gate pre-tool Bash --args-json $TOOL_INPUT_JSON --session-id $CLAUDE_SESSION_ID' },

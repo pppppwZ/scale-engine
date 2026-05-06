@@ -1,11 +1,15 @@
 // W3 Tests: SQLiteArtifactStore
+// NOTE: better-sqlite3 is not supported in Bun runtime
+// These tests will be skipped when running with Bun test runner
+
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { EventBus } from '../../src/core/eventBus.js'
-import { SQLiteArtifactStore } from '../../src/artifact/sqliteStore.js'
-import { FSM } from '../../src/artifact/fsm.js'
-import { registerAllFSMs, INITIAL_STATES } from '../../src/artifact/fsmDefinitions.js'
-import { ArtifactNotFoundError } from '../../src/artifact/types.js'
 import { rmSync, existsSync, mkdirSync } from 'node:fs'
+
+// Detect Bun runtime
+const isBun = typeof process !== 'undefined' && process.versions?.bun !== undefined
+
+// Skip all tests in Bun environment
+const describeOrSkip = isBun ? describe.skip : describe
 
 const TMP = './tmp/test-sqlite'
 const DB = `${TMP}/test.db`
@@ -13,9 +17,16 @@ const EVT = `${TMP}/events`
 const ART = `${TMP}/artifacts`
 const me = { kind: 'human' as const, userId: 'tester' }
 
-describe('SQLiteArtifactStore', () => {
-  let bus: EventBus
-  let store: SQLiteArtifactStore
+describeOrSkip('SQLiteArtifactStore', async () => {
+  // Dynamic imports for non-Bun environments
+  const { EventBus } = await import('../../src/core/eventBus.js')
+  const { SQLiteArtifactStore } = await import('../../src/artifact/sqliteStore.js')
+  const { FSM } = await import('../../src/artifact/fsm.js')
+  const { registerAllFSMs, INITIAL_STATES } = await import('../../src/artifact/fsmDefinitions.js')
+  const { ArtifactNotFoundError } = await import('../../src/artifact/types.js')
+
+  let bus: InstanceType<typeof EventBus>
+  let store: InstanceType<typeof SQLiteArtifactStore>
 
   beforeEach(() => {
     if (existsSync(TMP)) rmSync(TMP, { recursive: true, force: true })

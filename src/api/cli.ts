@@ -12,6 +12,7 @@ import { BruteRetryDetector, PrematureDoneDetector, BlameShiftDetector } from '.
 import { DangerousCommandDetector, SecretLeakDetector, RoleGateDetector, ScopeCreepDetector, BUILT_IN_ROLES } from '../guardrails/advancedDetectors.js'
 import { SQLiteKnowledgeBase } from '../knowledge/SQLiteKnowledgeBase.js'
 import { ContextBuilder } from '../context/ContextBuilder.js'
+import { FSMAgentBridge, type FSMContextSnapshot } from '../fsm/FSMAgentBridge.js'
 import { createAdapter, SUPPORTED_AGENTS } from '../adapters/index.js'
 import { LessonExtractor, RuleProposer, HookGenerator, EvolutionEngine } from '../evolution/EvolutionEngine.js'
 import { Doctor } from './doctor.js'
@@ -62,8 +63,9 @@ function createEngine() {
 
   const kb = new SQLiteKnowledgeBase(eventBus, { dbPath: join(SCALE_DIR, 'knowledge.db') })
   const ctx = new ContextBuilder(store, kb, eventBus)
+  const fsmAgentBridge = new FSMAgentBridge(fsm, store)
 
-  return { eventBus, store, fsm, gateway, roleGate, kb, ctx }
+  return { eventBus, store, fsm, gateway, roleGate, kb, ctx, fsmAgentBridge }
 }
 
 // ============================================================================
@@ -613,9 +615,71 @@ const contextStatus = defineCommand({
   },
 })
 
+const contextInject = defineCommand({
+  meta: { name: 'inject', description: 'Inject FSM context for SessionStart hook' },
+  args: {
+    'session-id': { type: 'string', required: true },
+  },
+  async run({ args }) {
+    const { eventBus, kb, fsmAgentBridge } = getEngine()
+
+    // Get FSM context for all session artifacts
+    const fsmContext = await fsmAgentBridge.getSessionContext(args['session-id'], eventBus)
+
+    // Recall relevant lessons based on artifact types
+    const artifactTypes = fsmContext.artifacts.map(a => a.artifactType)
+    if (artifactTypes.length > 0) {
+      const lessons = await kb.recall({ type: 'lesson', limit: 5 })
+      fsmContext.recalledLessons = lessons.map(l => `${l.id}: ${l.title} (${l.tags.join(',')})`)
+    }
+
+    // Output formatted context for Agent to read
+    const output = {
+      sessionId: fsmContext.sessionId,
+      generatedAt: fsmContext.generatedAt,
+      artifacts: fsmContext.artifacts.map(a => ({
+        id: a.artifactId,
+        type: a.artifactType,
+        status: a.currentStatus,
+        allowedActions: a.allowedTransitions,
+        blocked: a.blockingReasons.length > 0 ? a.blockingReasons : null,
+      })),
+      lessons: fsmContext.recalledLessons,
+      recommendations: fsmContext.recommendations,
+      // Human-readable summary
+      summary: formatContextSummary(fsmContext),
+    }
+
+    console.log(JSON.stringify(output, null, 2))
+  },
+})
+
+function formatContextSummary(ctx: { artifacts: FSMContextSnapshot[]; recommendations: string[] }): string {
+  const lines: string[] = []
+
+  if (ctx.artifacts.length === 0) {
+    lines.push('No active artifacts for this session.')
+  } else {
+    lines.push(`Active artifacts: ${ctx.artifacts.length}`)
+    for (const a of ctx.artifacts) {
+      const blocked = a.blockingReasons.length > 0 ? ' [BLOCKED]' : ''
+      lines.push(`  ${a.artifactId} (${a.artifactType}): ${a.currentStatus}${blocked}`)
+    }
+  }
+
+  if (ctx.recommendations.length > 0) {
+    lines.push('Recommendations:')
+    for (const r of ctx.recommendations) {
+      lines.push(`  ${r}`)
+    }
+  }
+
+  return lines.join('\n')
+}
+
 const context = defineCommand({
   meta: { name: 'context', description: 'Context assembly' },
-  subCommands: { build: contextBuild, status: contextStatus },
+  subCommands: { build: contextBuild, status: contextStatus, inject: contextInject },
 })
 
 // ============================================================================

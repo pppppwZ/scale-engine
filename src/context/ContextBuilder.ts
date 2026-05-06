@@ -2,7 +2,7 @@
 // 分层上下文加载 + Token 预算 + SCALE v10.0 哲学 P1 层 + 场景模式感知
 // 设计参考：docs/03-CORE-MODULES.md §3.6
 
-import type { ArtifactId, SessionId, ScenarioMode } from '../artifact/types.js'
+import type { ArtifactId, SessionId, ScenarioMode, KnowledgeEntry } from '../artifact/types.js'
 import type { IArtifactStore } from '../artifact/store.js'
 import type { IKnowledgeBase } from '../knowledge/KnowledgeBase.js'
 import type { IEventBus } from '../core/eventBus.js'
@@ -153,15 +153,11 @@ export class ContextBuilder implements IContextBuilder {
     }
 
     // P5: 召回 lessons (W7 集成)
-    if (opts.currentArtifactId) {
-      const artifact = await this.store.get(opts.currentArtifactId)
-      if (artifact) {
-        const lessons = await this.kb.recallByVector(artifact.title, 3)
-        if (lessons.length > 0) {
-          const content = '## 相关历史经验\n' + lessons.map((l) => `- ${l.title}`).join('\n')
-          layers.push({ name: 'recalled_lessons', content, priority: 5, estimatedTokens: 1500 })
-        }
-      }
+    // Enhanced: Always recall relevant lessons based on tags or artifact context
+    const lessons = await this.recallRelevantLessons(opts.currentArtifactId, opts.roleId)
+    if (lessons.length > 0) {
+      const content = '## 相关历史经验\n' + lessons.map((l) => `- ${l.title} (${l.tags.join(', ')})`).join('\n')
+      layers.push({ name: 'recalled_lessons', content, priority: 5, estimatedTokens: 1500 })
     }
 
     const available = this.budget.total - this.budget.reserved
@@ -179,6 +175,51 @@ export class ContextBuilder implements IContextBuilder {
       system: selected.map((l) => l.content).join('\n\n---\n\n'),
       metadata: { totalTokens: used, layers: selected.map((l) => l.name), scenarioMode },
     }
+  }
+
+  /**
+   * Enhanced lesson recall: based on artifact tags + role context
+   */
+  private async recallRelevantLessons(currentArtifactId?: ArtifactId, roleId?: string): Promise<KnowledgeEntry[]> {
+    const tagsToMatch: string[] = []
+
+    // 1. Extract tags from current artifact
+    if (currentArtifactId) {
+      const artifact = await this.store.get(currentArtifactId)
+      if (artifact?.tags) {
+        tagsToMatch.push(...artifact.tags)
+      }
+      // Also match on artifact type
+      if (artifact?.type) {
+        tagsToMatch.push(artifact.type)
+      }
+    }
+
+    // 2. Add role-specific tags
+    if (roleId) {
+      tagsToMatch.push(`role:${roleId}`)
+    }
+
+    // 3. Query verified lessons
+    const allLessons = await this.kb.recall({ type: 'lesson', verifiedOnly: true, limit: 10 })
+
+    // 4. If we have tags to match, try to filter by tag overlap
+    if (tagsToMatch.length > 0) {
+      const scored = allLessons.map(l => ({
+        lesson: l,
+        score: l.tags.filter(t => tagsToMatch.includes(t)).length
+      })).filter(s => s.score > 0)
+      scored.sort((a, b) => b.score - a.score)
+
+      // If we found matching lessons, return them
+      if (scored.length > 0) {
+        return scored.slice(0, 5).map(s => s.lesson)
+      }
+      // Otherwise, fallback to all verified lessons
+    }
+
+    // 5. Fallback: return top verified lessons
+    return allLessons.slice(0, 5)
   }
 
   async getStatus(sessionId: SessionId, roleGate: { getRole(): { id: string; allowedTools: string[]; deniedTools?: string[] } }): Promise<ContextStatus> {
