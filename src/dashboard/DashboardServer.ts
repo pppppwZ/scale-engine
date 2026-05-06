@@ -21,8 +21,27 @@ export interface DashboardState {
   artifacts: ArtifactTreeNode[]
   evolutionMetrics: EvolutionMetrics | null
   detectorStats: DetectorStatSummary[]
+  autoDefectStats: AutoDefectSummary | null
   recentEvents: RecentEvent[]
   timestamp: number
+}
+
+// AutoDefect statistics summary
+export interface AutoDefectSummary {
+  totalDefects: number
+  autoCreatedCount: number
+  byRootCause: Record<string, number>
+  bySeverity: Record<string, number>
+  recentDefects: RecentDefect[]
+}
+
+export interface RecentDefect {
+  id: string
+  title: string
+  rootCause: string
+  severity: string
+  detector: string
+  createdAt: number
 }
 
 // Artifact tree node for visualization
@@ -127,15 +146,22 @@ export class DashboardServer {
       return c.json(events)
     })
 
+    // AutoDefect statistics
+    this.app.get('/api/auto-defects', async (c) => {
+      const stats = await this.getAutoDefectStats()
+      return c.json(stats)
+    })
+
     // Index page - serve static HTML
     this.app.get('/', (c) => c.html(this.getIndexHtml()))
   }
 
   async getDashboardState(): Promise<DashboardState> {
-    const [artifacts, evolutionMetrics, detectorStats, recentEvents] = await Promise.all([
+    const [artifacts, evolutionMetrics, detectorStats, autoDefectStats, recentEvents] = await Promise.all([
       this.getArtifactTree(),
       this.getEvolutionMetrics(),
       Promise.resolve(this.getDetectorStats()),
+      this.getAutoDefectStats(),
       this.getRecentEvents(20),
     ])
 
@@ -143,6 +169,7 @@ export class DashboardServer {
       artifacts,
       evolutionMetrics,
       detectorStats,
+      autoDefectStats,
       recentEvents,
       timestamp: Date.now(),
     }
@@ -208,6 +235,55 @@ export class DashboardServer {
       bySeverity: s.bySeverity,
       lastTrigger: s.recentTriggers.length > 0 ? s.recentTriggers[s.recentTriggers.length - 1]?.triggeredAt : undefined,
     }))
+  }
+
+  async getAutoDefectStats(): Promise<AutoDefectSummary | null> {
+    if (!this.store) return null
+
+    // Query all Defect artifacts
+    const defects = await this.store.query({ type: 'Defect' })
+
+    const autoCreated = defects.filter(d => {
+      const payload = d.payload as Record<string, unknown>
+      return payload.autoCreated === true
+    })
+
+    // Count by rootCauseCategory
+    const byRootCause: Record<string, number> = {}
+    const bySeverity: Record<string, number> = {}
+
+    for (const d of autoCreated) {
+      const payload = d.payload as Record<string, unknown>
+      const rootCause = payload.rootCauseCategory as string ?? 'unknown'
+      const severity = payload.severity as string ?? 'unknown'
+
+      byRootCause[rootCause] = (byRootCause[rootCause] ?? 0) + 1
+      bySeverity[severity] = (bySeverity[severity] ?? 0) + 1
+    }
+
+    // Recent defects (last 10)
+    const recentDefects: RecentDefect[] = autoCreated
+      .slice(-10)
+      .reverse()
+      .map(d => {
+        const payload = d.payload as Record<string, unknown>
+        return {
+          id: d.id,
+          title: d.title,
+          rootCause: payload.rootCauseCategory as string ?? 'unknown',
+          severity: payload.severity as string ?? 'unknown',
+          detector: payload.detector as string ?? 'unknown',
+          createdAt: d.createdAt ?? (payload.timestamp as number ?? 0),
+        }
+      })
+
+    return {
+      totalDefects: defects.length,
+      autoCreatedCount: autoCreated.length,
+      byRootCause,
+      bySeverity,
+      recentDefects,
+    }
   }
 
   async getRecentEvents(limit: number): Promise<RecentEvent[]> {
