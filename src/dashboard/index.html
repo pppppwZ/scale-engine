@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SCALE Engine Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: oklch(15% 0.01 270);
+      color: oklch(90% 0.01 270);
+      padding: 2rem;
+    }
+    h1 { font-size: 2rem; margin-bottom: 1rem; color: oklch(70% 0.15 250); }
+    .section {
+      background: oklch(20% 0.01 270);
+      border-radius: 0.5rem;
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
+    .section h2 { font-size: 1.25rem; margin-bottom: 0.5rem; }
+    .artifact-node {
+      padding: 0.5rem;
+      border-left: 2px solid oklch(70% 0.15 250);
+      margin-left: 1rem;
+    }
+    .artifact-node.root { margin-left: 0; }
+    .status { padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; }
+    .status-DRAFT { background: oklch(60% 0.15 50); color: oklch(95% 0.01 50); }
+    .status-REVIEWING { background: oklch(60% 0.15 80); color: oklch(95% 0.01 80); }
+    .status-FROZEN { background: oklch(60% 0.15 250); color: oklch(95% 0.01 250); }
+    .status-COMPLETED { background: oklch(60% 0.15 150); color: oklch(95% 0.01 150); }
+    .metrics-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
+    .metric-card {
+      background: oklch(25% 0.01 270);
+      padding: 1rem;
+      border-radius: 0.5rem;
+      text-align: center;
+    }
+    .metric-value { font-size: 2rem; color: oklch(70% 0.15 250); }
+    .metric-label { font-size: 0.75rem; color: oklch(60% 0.01 270); }
+    .event-list { max-height: 200px; overflow-y: auto; }
+    .event-item { padding: 0.5rem; border-bottom: 1px solid oklch(30% 0.01 270); }
+    .event-type { color: oklch(70% 0.15 250); }
+    .loading { color: oklch(50% 0.01 270); }
+    .severity-low { background: oklch(60% 0.15 150); color: oklch(95% 0.01 150); }
+    .severity-medium { background: oklch(60% 0.15 80); color: oklch(95% 0.01 80); }
+    .severity-high { background: oklch(60% 0.15 50); color: oklch(95% 0.01 50); }
+    .severity-critical { background: oklch(50% 0.2 25); color: oklch(95% 0.01 25); }
+    .root-cause-tag { padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; margin: 0.25rem; display: inline-block; }
+    .defect-list { max-height: 300px; overflow-y: auto; }
+    .defect-item { padding: 0.75rem; border-bottom: 1px solid oklch(30% 0.01 270); }
+    .defect-title { font-weight: 600; }
+    .defect-meta { font-size: 0.75rem; color: oklch(60% 0.01 270); }
+    .count-bar { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem; }
+    .count-bar-fill { height: 1rem; border-radius: 0.25rem; }
+  </style>
+</head>
+<body>
+  <h1>SCALE Engine Dashboard</h1>
+  <div id="content" class="loading">Loading...</div>
+  <script>
+    async function loadDashboard() {
+      try {
+        const res = await fetch('/api/state');
+        const data = await res.json();
+        renderDashboard(data);
+        setInterval(async () => {
+          const res = await fetch('/api/state');
+          const data = await res.json();
+          renderDashboard(data);
+        }, 5000);
+      } catch (e) {
+        document.getElementById('content').innerHTML = '<p>Error loading dashboard: ' + e.message + '</p>';
+      }
+    }
+    function renderDashboard(data) {
+      const html = `
+        <div class="section">
+          <h2>Evolution Metrics</h2>
+          <div class="metrics-grid">
+            <div class="metric-card">
+              <div class="metric-value">${data.evolutionMetrics?.overallScore?.toFixed(1) ?? 'N/A'}</div>
+              <div class="metric-label">Overall Score</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-value">${data.evolutionMetrics?.lessonMetrics?.count ?? 0}</div>
+              <div class="metric-label">Lessons</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-value">${data.evolutionMetrics?.ruleMetrics?.count ?? 0}</div>
+              <div class="metric-label">Rules</div>
+            </div>
+            <div class="metric-card">
+              <div class="metric-value">${data.detectorStats.length}</div>
+              <div class="metric-label">Active Detectors</div>
+            </div>
+          </div>
+        </div>
+        <div class="section">
+          <h2>Artifact Tree</h2>
+          ${renderArtifacts(data.artifacts)}
+        </div>
+        <div class="section">
+          <h2>Detector Statistics</h2>
+          ${renderDetectors(data.detectorStats)}
+        </div>
+        <div class="section">
+          <h2>AutoDefect Statistics</h2>
+          ${renderAutoDefects(data.autoDefectStats)}
+        </div>
+        <div class="section">
+          <h2>Recent Events</h2>
+          <div class="event-list">
+            ${renderEvents(data.recentEvents)}
+          </div>
+        </div>
+      `;
+      document.getElementById('content').innerHTML = html;
+    }
+    function renderArtifacts(nodes) {
+      if (!nodes || nodes.length === 0) return '<p>No artifacts</p>';
+      return nodes.map(n => `
+        <div class="artifact-node root">
+          <strong>${n.id}</strong>: ${n.title}
+          <span class="status status-${n.status}">${n.status}</span>
+          ${n.children?.length > 0 ? n.children.map(c => `
+            <div class="artifact-node">
+              <strong>${c.id}</strong>: ${c.title}
+              <span class="status status-${c.status}">${c.status}</span>
+            </div>
+          `).join('') : ''}
+        </div>
+      `).join('');
+    }
+    function renderDetectors(stats) {
+      if (!stats || stats.length === 0) return '<p>No detector stats</p>';
+      return '<ul>' + stats.map(s => `
+        <li><strong>${s.name}</strong>: ${s.totalTriggers} triggers
+          (warn: ${s.bySeverity.warn ?? 0}, block: ${s.bySeverity.block ?? 0})
+        </li>
+      `).join('') + '</ul>';
+    }
+    function renderEvents(events) {
+      if (!events || events.length === 0) return '<p>No recent events</p>';
+      return events.map(e => `
+        <div class="event-item">
+          <span class="event-type">${e.type}</span>
+          <small>${new Date(e.timestamp).toLocaleTimeString()}</small>
+        </div>
+      `).join('');
+    }
+    function renderAutoDefects(stats) {
+      if (!stats) return '<p>No AutoDefect data</p>';
+      const rootCauseColors = {
+        hallucination: 'oklch(60% 0.15 250)',
+        ai_slop: 'oklch(60% 0.15 150)',
+        duplicate_edit: 'oklch(60% 0.15 80)',
+        brute_retry: 'oklch(60% 0.15 50)',
+        blame_shift: 'oklch(60% 0.15 30)',
+      };
+      const rootCauses = Object.entries(stats.byRootCause);
+      const severities = Object.entries(stats.bySeverity);
+      return `
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <div class="metric-value">${stats.totalDefects}</div>
+            <div class="metric-label">Total Defects</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">${stats.autoCreatedCount}</div>
+            <div class="metric-label">Auto-Created</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">${rootCauses.length}</div>
+            <div class="metric-label">Root Cause Types</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">${severities.length}</div>
+            <div class="metric-label">Severity Levels</div>
+          </div>
+        </div>
+        <div style="margin-top: 1rem;">
+          <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">By Root Cause</h3>
+          ${rootCauses.map(([cause, count]) => `
+            <span class="root-cause-tag" style="background: ${rootCauseColors[cause] ?? 'oklch(50% 0.01 270)'}">
+              ${cause}: ${count}
+            </span>
+          `).join('')}
+        </div>
+        <div style="margin-top: 1rem;">
+          <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">By Severity</h3>
+          ${severities.map(([sev, count]) => `
+            <span class="root-cause-tag severity-${sev}">
+              ${sev}: ${count}
+            </span>
+          `).join('')}
+        </div>
+        <div style="margin-top: 1rem;">
+          <h3 style="font-size: 1rem; margin-bottom: 0.5rem;">Recent AutoDefects</h3>
+          <div class="defect-list">
+            ${stats.recentDefects.length > 0 ? stats.recentDefects.map(d => `
+              <div class="defect-item">
+                <div class="defect-title">${d.title}</div>
+                <div class="defect-meta">
+                  <span class="status severity-${d.severity}">${d.severity}</span>
+                  <span class="root-cause-tag" style="background: ${rootCauseColors[d.rootCause] ?? 'oklch(50% 0.01 270)'}">${d.rootCause}</span>
+                  via ${d.detector} • ${new Date(d.createdAt).toLocaleString()}
+                </div>
+              </div>
+            `).join('') : '<p>No recent defects</p>'}
+          </div>
+        </div>
+      `;
+    }
+    loadDashboard();
+  </script>
+</body>
+</html>

@@ -294,6 +294,9 @@ export type EventType =
   | 'behavior.busy_loop'
   | 'behavior.premature_done'
   | 'behavior.blame_shift'
+  | 'behavior.ai_slop'
+  | 'behavior.hallucination'
+  | 'behavior.duplicate_edit'
   // Role
   | 'role.activated'
   | 'role.denied'
@@ -304,6 +307,7 @@ export type EventType =
   | 'session.cleared'
   // Knowledge
   | 'lesson.proposed'
+  | 'lesson.validated'
   | 'lesson.approved'
   | 'lesson.rejected'
   | 'lesson.recalled'
@@ -327,16 +331,37 @@ export type EventType =
   | 'task.decomposed'
   | `task.custom.${string}`
   // Evolution
+  | 'defect.auto_created'
   | 'rule.proposed'
   | 'rule.enforced'
   | 'hook.generated'
+  | 'hook.deployed'
+  | 'hook.rollback'
   | 'evolution.cycle_completed'
-  | 'pattern.extracted'
-  | 'pattern.verified'
-  | 'skill.proposed'
-  | 'skill.published'
+  | 'evolution.evaluated'
   // Context
   | 'context.built'
+  // Skills (v0.7.0)
+  | 'skill.registered'
+  | 'skill.unregistered'
+  | 'skill.recommended'
+  | 'skill.executed'
+  | 'skill.installation_changed'
+  | 'skills.cleared'
+  // Workflows (v0.7.0)
+  | 'workflow.started'
+  | 'workflow.paused'
+  | 'workflow.resumed'
+  | 'workflow.completed'
+  | 'workflow.failed'
+  | 'workflow.step_started'
+  | 'workflow.step_completed'
+  | 'workflow.step_failed'
+  // Triggers (v0.7.0)
+  | 'tool.used'
+  | 'detector.triggered'
+  | 'phase.changed'
+  | 'context.inject'
 
 export interface Event<TPayload = unknown> {
   id: EventId

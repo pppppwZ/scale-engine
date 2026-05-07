@@ -1,7 +1,7 @@
 {
   "name": "@hongmaple0820/scale-engine",
-  "version": "0.7.0",
-  "description": "SCALE Engine v0.7.0 — AI engineering scaffold: 11 agent adapters, 8 subagents, 10 skills, 10 MCP configs, layered rules, plugin market, dashboard GUI, FSM workflows, guardrails, self-evolution",
+  "version": "0.7.2",
+  "description": "SCALE Engine v0.7.1 — AI engineering scaffold: SessionStart FSM context injection, AutoDefectCreator for self-evolution loop, enhanced memory recall, 11 agent adapters, FSM artifacts, guardrail detectors",
   "type": "module",
   "bin": {
     "scale": "./dist/api/cli.js"
@@ -17,6 +17,9 @@
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "bun --watch src/api/cli.ts",

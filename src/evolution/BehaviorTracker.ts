@@ -1,9 +1,15 @@
 // SCALE Engine — Behavior Tracker (W10 完整实现)
 // 订阅事件流，统计指标，发现模式
+// v0.7.1 增强：自动触发进化周期
 // 设计参考：docs/03-CORE-MODULES.md §3.7
 
 import type { IEventBus } from '../core/eventBus.js'
 import { logger } from '../core/logger.js'
+
+export interface AutoEvolveConfig {
+  enabled: boolean
+  bruteRetryThreshold: number
+}
 
 export interface SessionMetrics {
   sessionId: string
@@ -23,13 +29,22 @@ export interface IBehaviorTracker {
   stop(): void
   getSessionMetrics(sessionId: string): Promise<SessionMetrics>
   detectPatterns(): Promise<unknown[]>
+  setAutoEvolve(config: AutoEvolveConfig, runCycleFn: () => Promise<void>): void
 }
 
 export class BehaviorTracker implements IBehaviorTracker {
   private subs: Array<{ unsubscribe(): void }> = []
   private metrics = new Map<string, SessionMetrics>()
+  private autoEvolveConfig: AutoEvolveConfig = { enabled: false, bruteRetryThreshold: 3 }
+  private runCycleFn?: () => Promise<void>
 
   constructor(private eventBus: IEventBus) {}
+
+  setAutoEvolve(config: AutoEvolveConfig, runCycleFn: () => Promise<void>): void {
+    this.autoEvolveConfig = config
+    this.runCycleFn = runCycleFn
+    logger.info({ config }, 'Auto-evolve configured')
+  }
 
   start(): void {
     this.subs.push(
@@ -73,7 +88,17 @@ export class BehaviorTracker implements IBehaviorTracker {
 
   private onToolCalled(sessionId: string, _payload: unknown): void { this.getOrCreate(sessionId).toolCalls += 1 }
   private onToolFailed(sessionId: string): void { this.getOrCreate(sessionId).toolFailures += 1 }
-  private onBruteRetry(sessionId: string): void { this.getOrCreate(sessionId).bruteRetryCount += 1 }
+  private onBruteRetry(sessionId: string): void {
+    const metrics = this.getOrCreate(sessionId)
+    metrics.bruteRetryCount += 1
+
+    // Auto-trigger evolution cycle when threshold reached
+    if (this.autoEvolveConfig.enabled && this.runCycleFn &&
+        metrics.bruteRetryCount >= this.autoEvolveConfig.bruteRetryThreshold) {
+      logger.warn({ sessionId, bruteRetryCount: metrics.bruteRetryCount }, 'Brute retry threshold reached — triggering auto-evolve')
+      this.runCycleFn().catch(err => logger.error({ err }, 'Auto-evolve cycle failed'))
+    }
+  }
   private onBlameShift(sessionId: string): void { this.getOrCreate(sessionId).blameShiftCount += 1 }
   private onPrematureDone(sessionId: string): void { this.getOrCreate(sessionId).prematureDoneCount += 1 }
   private onArtifactCreated(sessionId: string): void { this.getOrCreate(sessionId).artifactsCreated += 1 }

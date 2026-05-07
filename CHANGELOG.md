@@ -1,5 +1,118 @@
 # @hongmaple0820/scale-engine CHANGELOG
 
+## 0.7.1 - 2026-05-06
+
+### 工作流优化：SessionStart Hook 增强 + 自进化闭环自动化 + 记忆利用率提升
+
+**新增功能：**
+
+- **SessionStart Hook 增强**：Agent 主动感知 FSM 状态
+  - 新增 `scale context inject --session-id <id>` CLI 命令
+  - SessionStart hook 调用 FSMAgentBridge.getSessionContext()
+  - 获取活跃 Artifact FSM 状态 + 相关 Lessons
+  - 输出格式化上下文供 Agent 读取
+  - `src/api/cli.ts` 新增 contextInject 命令
+  - `src/fsm/FSMAgentBridge.ts` 新增 getSessionContext 方法
+  - `src/adapters/ClaudeCodeAdapter.ts` 修改 SessionStart hook
+
+- **AutoDefectCreator**：自进化闭环自动化
+  - 监听 behavior.hallucination、behavior.ai_slop 等事件
+  - 自动创建 Defect artifact（包含 rootCauseCategory、evidence、detector）
+  - 5 种事件类型处理：hallucination、ai_slop、duplicate_edit、brute_retry、blame_shift
+  - 发射 defect.auto_created 事件
+  - `src/evolution/AutoDefectCreator.ts`
+
+- **BehaviorTracker 增强**：自动触发进化周期
+  - 新增 setAutoEvolve() 配置方法
+  - bruteRetryCount >= threshold 时自动调用 EvolutionEngine.runCycle()
+  - `src/evolution/BehaviorTracker.ts`
+
+- **ContextBuilder 增强**：记忆利用率提升
+  - 自动召回 lessons（基于 artifact.tags + role context）
+  - 新增 recallRelevantLessons() 私有方法
+  - Tag 匹配评分 + 过滤
+  - 无 artifact 时也召回通用 lessons
+  - `src/context/ContextBuilder.ts`
+
+**改进：**
+
+- `src/artifact/types.ts` 新增事件类型：`defect.auto_created`
+- `src/index.ts` 导出新模块：AutoDefectCreator、IBehaviorTracker、AutoEvolveConfig、DefectPayload
+
+## 0.7.0 - 2026-05-06
+
+### 自进化循环增强：FSM 上下文桥接 + Hook 增强 + 检测器统计 + Lesson 验证 + Evolution 评估
+
+**新增功能：**
+
+- **FSMAgentBridge**：Agent FSM 上下文感知桥接
+  - 提供 `getSnapshot()` 获取 Artifact FSM 状态快照
+  - 提供 `getAllowedActions()` 获取当前状态允许的操作
+  - 提供 `suggestNext()` 建议下一步操作
+  - 提供 `formatForPrompt()` 格式化为 Agent 可读的上下文
+  - `src/fsm/FSMAgentBridge.ts`
+
+- **HookGeneratorEnhanced**：增强 Hook 生成器
+  - 支持模板化 Hook 生成（变量替换）
+  - 4 个内置模板：detector-trigger、lesson-learned、rule-enforcement、verification-gate
+  - Detector 集成支持（从 DetectorStatistics 生成 Hook）
+  - `src/hooks/HookGeneratorEnhanced.ts`
+
+- **HookDeployer**：Hook 部署管理器
+  - `deploy()` 部署 Hook 到 settings.json（备份原文件）
+  - `rollback()` 回滚到备份版本
+  - `validateForDeployment()` 验证 Hook 合规性
+  - `src/hooks/HookDeployer.ts`
+
+- **DetectorEnhanced**：增强检测器系统
+  - `DetectorStatisticsTracker`：跟踪检测器触发统计
+  - `DetectorRegistry`：检测器注册和配置管理
+  - `AISlopDetector`：AI 生成代码痕迹检测（渐变滥用、emoji、模板布局）
+  - `HallucinationDetector`：未验证成功声明检测（"测试通过"、"构建成功"等）
+  - `DuplicateEditDetector`：重复编辑检测（同一内容编辑多次）
+  - `EnhancedGatewayContext`：增强 Gateway 上下文（集成统计）
+  - `src/guardrails/DetectorEnhanced.ts`
+
+- **LessonValidator**：Lesson 提取验证系统
+  - 4-Gate 验证：Trigger、Googleability、Context-Specific、Deduplication
+  - 确保提取的 Lesson 不易搜索、上下文特定、无重复
+  - 事件发射：`lesson.validated`
+  - `src/evolution/LessonValidator.ts`
+
+- **EvolutionEvaluator**：进化效果评估器
+  - 收集 Lessons、Rules、Hooks、Detector 指标
+  - 计算 Lesson 质量、Rule 效果、Detector 效果分数
+  - 提供 `compareWithBaseline()` 对比基线
+  - 提供 `getRecommendations()` 生成改进建议
+  - Trend 分析：improving / stable / declining
+  - `src/evolution/EvolutionEvaluator.ts`
+
+- **DashboardServer**：Web Dashboard 可视化状态监控
+  - Hono-based web server 提供实时状态监控
+  - API routes: `/api/state`, `/api/artifacts`, `/api/evolution`, `/api/detectors`, `/api/events`
+  - Artifact 状态树可视化（parent-child 关系）
+  - Evolution metrics 实时展示（Lessons/Rules/Detectors 统计）
+  - Detector statistics 展示（触发次数、severity 分布）
+  - Recent events 流展示
+  - 每 5 秒自动刷新
+  - `src/dashboard/DashboardServer.ts`
+
+**改进：**
+
+- `src/artifact/types.ts` 新增事件类型：`hook.deployed`、`hook.rollback`、`behavior.ai_slop`、`behavior.hallucination`、`behavior.duplicate_edit`、`lesson.validated`、`evolution.evaluated`
+- `src/index.ts` 导出所有新模块（FSMAgentBridge、HookGeneratorEnhanced、HookDeployer、DetectorEnhanced 组件、LessonValidator、EvolutionEvaluator、DashboardServer）
+- SQLite tests 修复：`describe.skip` 在 Bun 环境中跳过 better-sqlite3 测试（Bun 不支持 better-sqlite3）
+
+**测试：**
+
+- 新增 FSMAgentBridge 测试（5 个）
+- 新增 HookGeneratorEnhanced 测试（5 个）
+- 新增 HookDeployer 测试（5 个）
+- 新增 DetectorEnhanced 测试（15 个）
+- 新增 LessonValidator 测试（10 个）
+- 新增 EvolutionEvaluator 测试（10 个）
+- 测试总数：323 passed（21 test files）
+
 ## 0.6.0 - 2026-04-29
 
 ### SQLite 持久化 KnowledgeBase + FSM 并发锁 + 第 9 检测器
