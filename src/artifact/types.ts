@@ -149,6 +149,7 @@ export interface SpecPayload {
   outOfScope: string[]
   edgeCases: string[]
   northStar: string
+  ambiguityScore?: number // FSM guard requires this for FROZEN transition
 }
 
 /** Plan —— 技术方案 (HOW) */
