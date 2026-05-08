@@ -24,6 +24,11 @@ export class OpenClawAdapter implements IAgentAdapter {
     return join(this.projectDir, 'AGENTS.md')
   }
 
+  getSkillsDir(): string {
+    // OpenClaw skills are project-level
+    return join(this.projectDir, '.openclaw', 'skills')
+  }
+
   isInstalled(): boolean {
     return existsSync(join(this.projectDir, '.openclaw'))
   }

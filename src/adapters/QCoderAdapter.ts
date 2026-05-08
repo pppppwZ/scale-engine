@@ -24,6 +24,11 @@ export class QCoderAdapter implements IAgentAdapter {
     return join(this.projectDir, 'QWEN.md')
   }
 
+  getSkillsDir(): string {
+    // QCoder skills are project-level
+    return join(this.projectDir, '.qwen', 'skills')
+  }
+
   isInstalled(): boolean {
     return existsSync(join(this.projectDir, '.qwen'))
   }

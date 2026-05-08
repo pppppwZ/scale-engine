@@ -3,6 +3,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
 import type { IAgentAdapter, AdapterConfig, InitResult, SettingsJson } from './ClaudeCodeAdapter.js'
 
 // ============================================================================
@@ -20,6 +21,11 @@ export class CodexAdapter implements IAgentAdapter {
 
   getKnowledgeDocPath(): string {
     return join(this.projectDir, 'AGENTS.md')
+  }
+
+  getSkillsDir(): string {
+    // Codex skills are global (homedir)
+    return join(homedir(), '.omx', 'skills')
   }
 
   isInstalled(): boolean {

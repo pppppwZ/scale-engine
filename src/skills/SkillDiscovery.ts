@@ -87,18 +87,26 @@ export interface ISkillDiscovery {
 // Platform Skills Directory Map
 // ============================================================================
 
-const PLATFORM_SKILLS_DIRS: Record<AgentPlatform, string | null> = {
+/** 全局级平台：skills 目录在 homedir 下 */
+const GLOBAL_PLATFORMS: AgentPlatform[] = ['claude-code', 'codex', 'opencode']
+
+/** 项目级平台：skills 目录在项目目录下 */
+const PROJECT_PLATFORMS: AgentPlatform[] = ['cursor', 'gemini', 'openclaw', 'hermes', 'trae', 'workbuddy', 'vsc', 'qcoder']
+
+const PLATFORM_SKILLS_DIRS: Record<AgentPlatform, string> = {
+  // 全局级（homedir）
   'claude-code': join(homedir(), '.claude', 'skills'),
   'codex': join(homedir(), '.omx', 'skills'),
   'opencode': join(homedir(), '.config', 'opencode', 'skills'),
+  // 项目级（相对路径，与适配器配置一致）
   'cursor': join('.cursor', 'skills'),
-  'gemini': null,
-  'openclaw': null,
-  'hermes': null,
-  'trae': null,
-  'workbuddy': null,
-  'vsc': null,
-  'qcoder': null,
+  'gemini': join('.gemini', 'skills'),
+  'openclaw': join('.openclaw', 'skills'),
+  'hermes': join('.hermes', 'skills'),
+  'trae': join('.trae', 'skills'),
+  'workbuddy': join('.workbuddy', 'skills'),
+  'vsc': join('.vscode', 'skills'),
+  'qcoder': join('.qwen', 'skills'),
 }
 
 export class SkillDiscovery implements ISkillDiscovery {
@@ -228,9 +236,12 @@ export class SkillDiscovery implements ISkillDiscovery {
 
   scanSkills(platform: AgentPlatform): SkillScanResult {
     const skillsDir = PLATFORM_SKILLS_DIRS[platform]
-    if (!skillsDir) return { platform, skillsDir: '', skills: [], exists: false }
 
-    const resolvedDir = platform === 'opencode' ? skillsDir : join(this.projectDir, skillsDir)
+    // 区分全局级和项目级目录解析
+    const resolvedDir = GLOBAL_PLATFORMS.includes(platform)
+      ? skillsDir // 全局级：直接使用绝对路径
+      : join(this.projectDir, skillsDir) // 项目级：拼接项目目录
+
     if (!existsSync(resolvedDir)) return { platform, skillsDir: resolvedDir, skills: [], exists: false }
 
     const skills: SkillRef[] = []

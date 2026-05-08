@@ -24,6 +24,11 @@ export class VSCAdapter implements IAgentAdapter {
     return join(this.projectDir, 'VSC.md')
   }
 
+  getSkillsDir(): string {
+    // VSC skills are project-level
+    return join(this.projectDir, '.vscode', 'skills')
+  }
+
   isInstalled(): boolean {
     return existsSync(this.getSettingsPath())
   }

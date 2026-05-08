@@ -24,6 +24,11 @@ export class GeminiAdapter implements IAgentAdapter {
     return join(this.projectDir, 'GEMINI.md')
   }
 
+  getSkillsDir(): string {
+    // Gemini skills are project-level
+    return join(this.projectDir, '.gemini', 'skills')
+  }
+
   isInstalled(): boolean {
     return existsSync(join(this.projectDir, '.gemini'))
   }

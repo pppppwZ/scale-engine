@@ -24,6 +24,11 @@ export class TraeAdapter implements IAgentAdapter {
     return join(this.projectDir, 'TRAE.md')
   }
 
+  getSkillsDir(): string {
+    // Trae skills are project-level
+    return join(this.projectDir, '.trae', 'skills')
+  }
+
   isInstalled(): boolean {
     return existsSync(join(this.projectDir, '.trae'))
   }

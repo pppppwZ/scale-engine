@@ -24,6 +24,11 @@ export class HermesAdapter implements IAgentAdapter {
     return join(this.projectDir, '.hermes.md')
   }
 
+  getSkillsDir(): string {
+    // Hermes skills are project-level
+    return join(this.projectDir, '.hermes', 'skills')
+  }
+
   isInstalled(): boolean {
     return existsSync(join(this.projectDir, '.hermes'))
   }

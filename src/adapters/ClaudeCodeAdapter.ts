@@ -4,6 +4,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { logger } from '../core/logger.js'
 
 // ============================================================================
@@ -49,6 +50,7 @@ export interface IAgentAdapter {
   init(config: AdapterConfig): Promise<InitResult>
   getSettingsPath(): string
   getKnowledgeDocPath(): string
+  getSkillsDir(): string
   generateSettings(): SettingsJson
   generateKnowledgeDoc(projectName: string, techStack?: string[]): string
   mergeSettings(existing: SettingsJson): SettingsJson
@@ -78,6 +80,11 @@ export class ClaudeCodeAdapter implements IAgentAdapter {
 
   getKnowledgeDocPath(): string {
     return join(this.projectDir, 'CLAUDE.md')
+  }
+
+  getSkillsDir(): string {
+    // Claude Code skills are global (homedir)
+    return join(homedir(), '.claude', 'skills')
   }
 
   isInstalled(): boolean {

@@ -24,6 +24,11 @@ export class WorkBuddyAdapter implements IAgentAdapter {
     return join(this.projectDir, 'WORKBUDDY.md')
   }
 
+  getSkillsDir(): string {
+    // WorkBuddy skills are project-level
+    return join(this.projectDir, '.workbuddy', 'skills')
+  }
+
   isInstalled(): boolean {
     return existsSync(join(this.projectDir, '.workbuddy'))
   }
