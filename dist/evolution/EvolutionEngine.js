@@ -4,6 +4,7 @@
 import { logger } from '../core/logger.js';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { platform } from 'node:os';
 export class LessonExtractor {
     constructor(store, kb, eventBus) {
         this.store = store;
@@ -196,10 +197,25 @@ export class HookGenerator {
         mkdirSync(hooksDir, { recursive: true });
         const hookType = this.inferHookType(rule.pattern);
         const matcher = this.inferMatcher(rule.pattern);
-        const scriptName = `${rule.id}.sh`;
+        const isWin = platform() === 'win32';
+        const scriptName = isWin ? `${rule.id}.js` : `${rule.id}.sh`;
         const scriptPath = join(hooksDir, scriptName);
-        // Generate shell script
-        const script = `#!/bin/bash
+        // Generate platform-appropriate hook script
+        const script = isWin
+            ? `// Auto-generated hook from Rule: ${rule.id}
+// Source lesson: ${rule.sourceLesson}
+// Pattern: ${rule.pattern}
+// Hook type: ${hookType} | Matcher: ${matcher}
+//
+// This hook was automatically promoted from a recurring lesson.
+// Edit with caution — it enforces a hard constraint.
+
+const input = JSON.parse(process.argv[2] || '{}');
+// TODO: Implement specific check for pattern "${rule.pattern}"
+console.error("Hook ${rule.id} checked (pattern: ${rule.pattern})");
+process.exit(0);
+`
+            : `#!/bin/bash
 # Auto-generated hook from Rule: ${rule.id}
 # Source lesson: ${rule.sourceLesson}
 # Pattern: ${rule.pattern}

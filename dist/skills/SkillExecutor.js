@@ -1,6 +1,7 @@
 // SCALE Engine — Skill Executor (v0.9.0)
 // 技能执行器：执行不同类型的技能 + MCP 能力集成
 import { spawn } from "node:child_process";
+import { platform } from "node:os";
 export class SkillExecutor {
     constructor(skillRegistry, eventBus, capabilityRegistry) {
         this.builtinFunctions = {};
@@ -172,7 +173,10 @@ export class SkillExecutor {
     }
     runCommand(command, timeout) {
         return new Promise((resolve, reject) => {
-            const proc = spawn("sh", ["-c", command], { timeout });
+            const isWin = platform() === "win32";
+            const proc = isWin
+                ? spawn("cmd", ["/c", command], { timeout })
+                : spawn("sh", ["-c", command], { timeout });
             let stdout = "";
             proc.stdout.on("data", (d) => stdout += d);
             proc.on("close", (c) => c === 0 ? resolve(stdout) : reject(new Error("Command failed")));

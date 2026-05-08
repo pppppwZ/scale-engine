@@ -5,6 +5,7 @@ import type { IEventBus } from "../core/eventBus.js"
 import type { ISkillRegistry, SkillExecutionType } from "./SkillRegistry.js"
 import type { ICapabilityRegistry, IBrowserCapability, ISearchCapability, IComputerCapability } from "../capabilities/types.js"
 import { spawn } from "node:child_process"
+import { platform } from "node:os"
 
 export interface SkillExecutionResult {
   skillId: string
@@ -177,7 +178,10 @@ export class SkillExecutor implements ISkillExecutor {
 
   private runCommand(command: string, timeout: number): Promise<string> {
     return new Promise((resolve, reject) => {
-      const proc = spawn("sh", ["-c", command], { timeout })
+      const isWin = platform() === "win32"
+      const proc = isWin
+        ? spawn("cmd", ["/c", command], { timeout })
+        : spawn("sh", ["-c", command], { timeout })
       let stdout = ""
       proc.stdout.on("data", (d) => stdout += d)
       proc.on("close", (c) => c === 0 ? resolve(stdout) : reject(new Error("Command failed")))

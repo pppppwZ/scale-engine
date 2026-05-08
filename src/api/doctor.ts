@@ -154,7 +154,7 @@ export class Doctor {
     if (!existsSync(dir)) {
       return { name: 'Hooks directory', status: 'ok', message: 'Not created yet (no evolved hooks)' }
     }
-    const files = readdirSync(dir).filter((f) => f.endsWith('.sh'))
+    const files = readdirSync(dir).filter((f) => f.endsWith('.sh') || f.endsWith('.js') || f.endsWith('.cmd'))
     return { name: 'Hooks directory', status: 'ok', message: `${files.length} hooks` }
   }
 
