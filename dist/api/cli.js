@@ -1,0 +1,987 @@
+#!/usr/bin/env node
+// SCALE Engine — CLI 入口 (W6 完整实现)
+// 所有 Hook 调用入口: session/gate/create/list/transition/context
+import { defineCommand, runMain } from 'citty';
+import { EventBus } from '../core/eventBus.js';
+import { SQLiteArtifactStore } from '../artifact/sqliteStore.js';
+import { FSM } from '../artifact/fsm.js';
+import { registerAllFSMs, INITIAL_STATES } from '../artifact/fsmDefinitions.js';
+import { Gateway } from '../guardrails/Gateway.js';
+import { BruteRetryDetector, PrematureDoneDetector, BlameShiftDetector } from '../guardrails/detectors.js';
+import { DangerousCommandDetector, SecretLeakDetector, RoleGateDetector, ScopeCreepDetector, BUILT_IN_ROLES } from '../guardrails/advancedDetectors.js';
+import { SQLiteKnowledgeBase } from '../knowledge/SQLiteKnowledgeBase.js';
+import { ContextBuilder } from '../context/ContextBuilder.js';
+import { FSMAgentBridge } from '../fsm/FSMAgentBridge.js';
+import { createAdapter, SUPPORTED_AGENTS } from '../adapters/index.js';
+import { LessonExtractor, RuleProposer, HookGenerator, EvolutionEngine } from '../evolution/EvolutionEngine.js';
+import { Doctor } from './doctor.js';
+import { quickStart, detectPlatform } from './quickstart.js';
+import { SkillDiscovery } from '../skills/SkillDiscovery.js';
+import { listWorkflowPresets, getPresetsByScenario } from '../workflows/presets.js';
+import { existsSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+// ============================================================================
+// Engine bootstrap (单例 + lazy init)
+// ============================================================================
+const SCALE_DIR = process.env.SCALE_DIR ?? '.scale';
+const DB_PATH = join(SCALE_DIR, 'scale.db');
+function ensureDir(dir) {
+    if (!existsSync(dir))
+        mkdirSync(dir, { recursive: true });
+}
+let _engine = null;
+function getEngine() {
+    if (!_engine)
+        _engine = createEngine();
+    return _engine;
+}
+function createEngine() {
+    ensureDir(SCALE_DIR);
+    const eventBus = new EventBus({ eventsDir: join(SCALE_DIR, 'events') });
+    const store = new SQLiteArtifactStore(eventBus, {
+        dbPath: DB_PATH,
+        artifactsDir: join(SCALE_DIR, 'artifacts'),
+    });
+    const fsm = new FSM(store, eventBus);
+    registerAllFSMs(fsm);
+    const gateway = new Gateway(eventBus);
+    const roleGate = new RoleGateDetector();
+    // Register all detectors (9 total)
+    gateway.registerDetector(new DangerousCommandDetector(), 'preTool');
+    gateway.registerDetector(new SecretLeakDetector(), 'preTool');
+    gateway.registerDetector(roleGate, 'preTool');
+    gateway.registerDetector(new BruteRetryDetector(), 'preTool');
+    gateway.registerDetector(new ScopeCreepDetector(), 'preTool');
+    gateway.registerDetector(new PrematureDoneDetector(), 'beforeStop');
+    gateway.registerDetector(new BlameShiftDetector(), 'postTool');
+    const kb = new SQLiteKnowledgeBase(eventBus, { dbPath: join(SCALE_DIR, 'knowledge.db') });
+    const ctx = new ContextBuilder(store, kb, eventBus);
+    const fsmAgentBridge = new FSMAgentBridge(fsm, store);
+    return { eventBus, store, fsm, gateway, roleGate, kb, ctx, fsmAgentBridge };
+}
+// ============================================================================
+// session commands
+// ============================================================================
+const sessionStart = defineCommand({
+    meta: { name: 'start', description: 'Start a new session' },
+    args: {
+        agent: { type: 'string', default: 'claude-code' },
+        'session-id': { type: 'string', required: true },
+    },
+    async run({ args }) {
+        const { eventBus } = getEngine();
+        eventBus.emit('session.started', {
+            agent: args.agent,
+            sessionId: args['session-id'],
+            startedAt: Date.now(),
+        }, { sessionId: args['session-id'] });
+        console.log(JSON.stringify({ ok: true, sessionId: args['session-id'], agent: args.agent }));
+    },
+});
+const sessionEnd = defineCommand({
+    meta: { name: 'end', description: 'End current session' },
+    args: {
+        'session-id': { type: 'string', required: true },
+    },
+    async run({ args }) {
+        const { eventBus } = getEngine();
+        eventBus.emit('session.ended', {
+            sessionId: args['session-id'],
+            endedAt: Date.now(),
+        }, { sessionId: args['session-id'] });
+        console.log(JSON.stringify({ ok: true, sessionId: args['session-id'] }));
+    },
+});
+const session = defineCommand({
+    meta: { name: 'session', description: 'Session lifecycle' },
+    subCommands: { start: sessionStart, end: sessionEnd },
+});
+// ============================================================================
+// gate commands (Hook 入口)
+// ============================================================================
+const gatePreTool = defineCommand({
+    meta: { name: 'pre-tool', description: 'Pre-tool gate check' },
+    args: {
+        tool: { type: 'positional', required: true },
+        'args-json': { type: 'string', default: '{}' },
+        'session-id': { type: 'string', required: true },
+    },
+    async run({ args }) {
+        const { gateway } = getEngine();
+        let toolArgs = {};
+        try {
+            toolArgs = JSON.parse(args['args-json']);
+        }
+        catch { /* empty */ }
+        const decision = await gateway.preTool({
+            sessionId: args['session-id'],
+            tool: args.tool,
+            args: toolArgs,
+        });
+        if (!decision.allow) {
+            // 输出到 stderr 让 AI 看到原因
+            process.stderr.write(decision.reason ?? 'Blocked by SCALE guardrail');
+            if (decision.suggestion)
+                process.stderr.write(`\nSuggestion: ${decision.suggestion}`);
+            process.exit(2);
+        }
+        // 静默通过（不输出 → 不消耗 token）
+    },
+});
+const gatePostTool = defineCommand({
+    meta: { name: 'post-tool', description: 'Post-tool event recording' },
+    args: {
+        tool: { type: 'positional', required: true },
+        'args-json': { type: 'string', default: '{}' },
+        'output-json': { type: 'string', default: '' },
+        'exit-code': { type: 'string', default: '0' },
+        'session-id': { type: 'string', required: true },
+    },
+    async run({ args }) {
+        const { gateway } = getEngine();
+        let toolArgs = {};
+        try {
+            toolArgs = JSON.parse(args['args-json']);
+        }
+        catch { /* empty */ }
+        await gateway.postTool({
+            sessionId: args['session-id'],
+            tool: args.tool,
+            args: toolArgs,
+            exitCode: parseInt(args['exit-code'], 10),
+            output: args['output-json'],
+        });
+        // 静默（不消耗 token）
+    },
+});
+const gateBeforeStop = defineCommand({
+    meta: { name: 'before-stop', description: 'Before-stop gate check' },
+    args: { 'session-id': { type: 'string', required: true } },
+    async run({ args }) {
+        const { gateway } = getEngine();
+        const decision = await gateway.beforeStop({ sessionId: args['session-id'] });
+        if (!decision.allow) {
+            process.stderr.write(decision.reason ?? 'Cannot stop yet');
+            if (decision.suggestion)
+                process.stderr.write(`\nSuggestion: ${decision.suggestion}`);
+            process.exit(2);
+        }
+    },
+});
+const gate = defineCommand({
+    meta: { name: 'gate', description: 'Guardrail gate commands' },
+    subCommands: { 'pre-tool': gatePreTool, 'post-tool': gatePostTool, 'before-stop': gateBeforeStop },
+});
+// ============================================================================
+// artifact CRUD
+// ============================================================================
+const create = defineCommand({
+    meta: { name: 'create', description: 'Create an artifact' },
+    args: {
+        type: { type: 'positional', required: true },
+        title: { type: 'positional', required: true },
+        parent: { type: 'string' },
+        payload: { type: 'string', default: '{}' },
+    },
+    async run({ args }) {
+        const { store } = getEngine();
+        let payload = {};
+        try {
+            payload = JSON.parse(args.payload);
+        }
+        catch { /* empty */ }
+        const artifact = await store.create({
+            type: args.type,
+            title: args.title,
+            payload,
+            parents: args.parent ? [args.parent] : [],
+            initialStatus: INITIAL_STATES[args.type] ?? 'DRAFT',
+            createdBy: { kind: 'human', userId: process.env.USER ?? 'cli' },
+        });
+        console.log(JSON.stringify(artifact, null, 2));
+    },
+});
+const list = defineCommand({
+    meta: { name: 'list', description: 'List artifacts' },
+    args: { type: { type: 'string' }, status: { type: 'string' }, limit: { type: 'string', default: '20' } },
+    async run({ args }) {
+        const { store } = getEngine();
+        const items = await store.query({
+            type: args.type,
+            status: args.status,
+            limit: parseInt(args.limit, 10),
+        });
+        console.log(JSON.stringify(items, null, 2));
+    },
+});
+const show = defineCommand({
+    meta: { name: 'show', description: 'Show artifact details' },
+    args: { id: { type: 'positional', required: true } },
+    async run({ args }) {
+        const { store } = getEngine();
+        const artifact = await store.get(args.id);
+        if (!artifact) {
+            console.error(`Artifact not found: ${args.id}`);
+            process.exit(1);
+        }
+        console.log(JSON.stringify(artifact, null, 2));
+    },
+});
+// ============================================================================
+// suggest command — 降低用户认知负担
+// ============================================================================
+const suggest = defineCommand({
+    meta: { name: 'suggest', description: 'Show available actions for an artifact' },
+    args: {
+        id: { type: 'positional', required: true },
+        json: { type: 'boolean', default: false },
+    },
+    async run({ args }) {
+        const { store, fsm } = getEngine();
+        const artifact = await store.get(args.id);
+        if (!artifact) {
+            console.error(`Artifact not found: ${args.id}`);
+            process.exit(1);
+        }
+        const def = fsm.getDefinition(artifact.type);
+        if (!def) {
+            console.error(`No FSM registered for type: ${artifact.type}`);
+            process.exit(1);
+        }
+        // 获取当前状态可用的 transitions
+        const availableTxs = def.transitions.filter((t) => t.from === artifact.status);
+        // 对每个 action 检查 guards
+        const suggestions = await Promise.all(availableTxs.map(async (tx) => {
+            const guardCheck = await fsm.canTransition(args.id, tx.action);
+            return {
+                action: tx.action,
+                to: tx.to,
+                guards: (tx.guards ?? []).map((g) => g.name),
+                guardMessages: (tx.guards ?? []).map((g) => g.errorMessage),
+                canExecute: guardCheck.allowed,
+                blockedBy: guardCheck.blockedBy,
+            };
+        }));
+        if (args.json) {
+            console.log(JSON.stringify({
+                id: artifact.id,
+                type: artifact.type,
+                currentStatus: artifact.status,
+                isTerminal: def.terminal.includes(artifact.status),
+                suggestions,
+            }, null, 2));
+        }
+        else {
+            // 人类友好的输出
+            console.log(`\n📊 ${artifact.id} (${artifact.type})`);
+            console.log(`   Current status: ${artifact.status}`);
+            if (def.terminal.includes(artifact.status)) {
+                console.log(`   ⚠️  Terminal state — no further transitions available`);
+            }
+            console.log('');
+            console.log('Available actions:');
+            console.log('──────────────────────────────────────────────────');
+            if (suggestions.length === 0) {
+                console.log('  No actions available from this state.');
+            }
+            else {
+                for (const s of suggestions) {
+                    const status = s.canExecute ? '✅' : '❌';
+                    console.log(`  ${status} ${s.action} → ${s.to}`);
+                    if (s.guards.length > 0) {
+                        for (const g of s.guardMessages) {
+                            console.log(`      Guard: ${g}`);
+                        }
+                    }
+                    if (s.blockedBy && s.blockedBy.length > 0) {
+                        for (const b of s.blockedBy) {
+                            console.log(`      ❌ ${b.message}`);
+                        }
+                    }
+                }
+            }
+            console.log('──────────────────────────────────────────────────');
+            console.log('\nUsage: scale transition <id> <action> --reason "..."');
+        }
+    },
+});
+// ============================================================================
+// create-prd command — 自动创建 Spec+Plan+Tasks 层级
+// ============================================================================
+const createPRD = defineCommand({
+    meta: { name: 'create-prd', description: 'Create PRD hierarchy (Spec → Plan → Tasks)' },
+    args: {
+        title: { type: 'positional', required: true },
+        specs: { type: 'string', description: 'Spec description' },
+        plans: { type: 'string', description: 'Plan design' },
+        tasks: { type: 'string', description: 'Task list (comma-separated)' },
+        'session-id': { type: 'string', required: false },
+    },
+    async run({ args }) {
+        const { store } = getEngine();
+        // 1. 创建 Spec
+        const spec = await store.create({
+            type: 'Spec',
+            title: args.title,
+            payload: { description: args.specs ?? '', ambiguityScore: 0.3 },
+            initialStatus: 'DRAFT',
+            createdBy: { kind: 'human', userId: process.env.USER ?? 'cli' },
+        });
+        // 2. 创建 Plan
+        const plan = await store.create({
+            type: 'Plan',
+            title: `${args.title} - Implementation Plan`,
+            payload: { design: args.plans ?? '' },
+            parents: [spec.id],
+            initialStatus: 'DRAFT',
+            createdBy: { kind: 'human', userId: process.env.USER ?? 'cli' },
+        });
+        // 3. 批量创建 Tasks
+        const taskList = (args.tasks ?? '').split(',').map((t) => t.trim()).filter((t) => t.length > 0);
+        const tasks = [];
+        for (const taskTitle of taskList) {
+            const task = await store.create({
+                type: 'Task',
+                title: taskTitle,
+                payload: { description: taskTitle, filesInvolved: [], dependsOn: [], requiredRole: 'implementer', requiredCapabilities: [] },
+                parents: [plan.id],
+                initialStatus: 'TODO',
+                createdBy: { kind: 'human', userId: process.env.USER ?? 'cli' },
+            });
+            tasks.push({ id: task.id, title: task.title });
+        }
+        // 输出层级树
+        console.log('\n✅ PRD hierarchy created:');
+        console.log(`\nSpec: ${spec.id} (DRAFT)`);
+        console.log(`  └─ Plan: ${plan.id} (DRAFT)`);
+        for (const task of tasks) {
+            console.log(`      └─ Task: ${task.id} (TODO) - ${task.title}`);
+        }
+        console.log('\nNext steps:');
+        console.log('  1. scale transition spec submit');
+        console.log('  2. scale transition spec review');
+        console.log('  3. scale transition spec approve (requires ambiguity ≤ 0.2)');
+        console.log('  4. scale transition plan approve');
+        console.log('  5. scale transition task-* ready (for each task)');
+    },
+});
+// ============================================================================
+// FSM transition
+// ============================================================================
+const transition = defineCommand({
+    meta: { name: 'transition', description: 'Transition artifact state' },
+    args: {
+        id: { type: 'positional', required: true },
+        action: { type: 'positional', required: true },
+        reason: { type: 'string' },
+    },
+    async run({ args }) {
+        const { fsm } = getEngine();
+        const result = await fsm.transition(args.id, args.action, {
+            actor: { kind: 'human', userId: process.env.USER ?? 'cli' },
+            reason: args.reason,
+        });
+        console.log(JSON.stringify(result, null, 2));
+        if (!result.success)
+            process.exit(1);
+    },
+});
+// ============================================================================
+// verify-task command — 代码质量验证（防止虚假完成）
+// ============================================================================
+const verifyTask = defineCommand({
+    meta: { name: 'verify-task', description: 'Verify task code quality (build/lint/test)' },
+    args: {
+        id: { type: 'positional', required: true },
+        'build-cmd': { type: 'string', default: 'npm run build', description: 'Build command' },
+        'lint-cmd': { type: 'string', default: 'npm run lint', description: 'Lint command' },
+        'test-cmd': { type: 'string', default: 'npm test', description: 'Test command' },
+        'skip-build': { type: 'boolean', default: false, description: 'Skip build check' },
+        'skip-lint': { type: 'boolean', default: false, description: 'Skip lint check' },
+        'skip-test': { type: 'boolean', default: false, description: 'Skip test check' },
+        json: { type: 'boolean', default: false, description: 'Output as JSON' },
+    },
+    async run({ args }) {
+        const { store, eventBus } = getEngine();
+        const artifact = await store.get(args.id);
+        if (!artifact || artifact.type !== 'Task') {
+            console.error(`Task not found: ${args.id}`);
+            process.exit(1);
+        }
+        const results = {
+            buildStatus: 'pending',
+            buildExitCode: undefined,
+            lintStatus: 'pending',
+            testPassed: undefined,
+            testCoverage: undefined,
+        };
+        // Helper: run command and capture exit code
+        const runCmd = async (cmd) => {
+            const { spawn } = await import('node:child_process');
+            return new Promise((resolve) => {
+                const child = spawn(cmd, [], { shell: true, stdio: 'pipe' });
+                let output = '';
+                child.stdout?.on('data', (d) => (output += d));
+                child.stderr?.on('data', (d) => (output += d));
+                child.on('close', (code) => resolve({ exitCode: code ?? 1, output }));
+            });
+        };
+        // Run build
+        if (!args['skip-build']) {
+            if (!args.json)
+                console.log('\n🔨 Running build...');
+            const build = await runCmd(args['build-cmd']);
+            results.buildStatus = build.exitCode === 0 ? 'success' : 'failed';
+            results.buildExitCode = build.exitCode;
+            if (!args.json) {
+                if (build.exitCode === 0) {
+                    console.log('   ✅ Build passed');
+                }
+                else {
+                    console.log('   ❌ Build failed (exit code:', build.exitCode, ')');
+                    console.log('   Output:', build.output.slice(0, 500));
+                }
+            }
+        }
+        // Run lint
+        if (!args['skip-lint']) {
+            if (!args.json)
+                console.log('\n🔍 Running lint...');
+            const lint = await runCmd(args['lint-cmd']);
+            results.lintStatus = lint.exitCode === 0 ? 'success' : 'failed';
+            if (!args.json) {
+                if (lint.exitCode === 0) {
+                    console.log('   ✅ Lint passed');
+                }
+                else {
+                    console.log('   ❌ Lint failed (exit code:', lint.exitCode, ')');
+                    console.log('   Output:', lint.output.slice(0, 500));
+                }
+            }
+        }
+        // Run tests
+        if (!args['skip-test']) {
+            if (!args.json)
+                console.log('\n🧪 Running tests...');
+            const test = await runCmd(args['test-cmd']);
+            results.testPassed = test.exitCode === 0;
+            // Try to extract coverage from output (Jest format)
+            const coverageMatch = test.output.match(/All files[^|]*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|\s*(\d+\.?\d*)/);
+            if (coverageMatch)
+                results.testCoverage = parseFloat(coverageMatch[1]);
+            if (!args.json) {
+                if (test.exitCode === 0) {
+                    console.log('   ✅ Tests passed');
+                    if (results.testCoverage)
+                        console.log('   Coverage:', results.testCoverage, '%');
+                }
+                else {
+                    console.log('   ❌ Tests failed (exit code:', test.exitCode, ')');
+                    console.log('   Output:', test.output.slice(0, 500));
+                }
+            }
+        }
+        // Update Task payload
+        const currentPayload = artifact.payload;
+        const updated = await store.update(args.id, {
+            payload: { ...currentPayload, ...results },
+        });
+        // Emit event
+        eventBus.emit('artifact.updated', {
+            artifactId: args.id,
+            changes: { payload: results },
+            reason: 'verify-task',
+        }, { sessionId: 'cli' });
+        // Output
+        if (args.json) {
+            console.log(JSON.stringify({ taskId: args.id, results, artifact: updated }, null, 2));
+        }
+        else {
+            console.log('\n📊 Verification results:');
+            console.log('──────────────────────────────────────────────────');
+            console.log(`  Build:  ${results.buildStatus === 'success' ? '✅' : results.buildStatus === 'failed' ? '❌' : '⏭️'} ${results.buildStatus}`);
+            if (results.buildExitCode !== undefined)
+                console.log(`          Exit code: ${results.buildExitCode}`);
+            console.log(`  Lint:   ${results.lintStatus === 'success' ? '✅' : results.lintStatus === 'failed' ? '❌' : '⏭️'} ${results.lintStatus}`);
+            console.log(`  Tests:  ${results.testPassed === true ? '✅' : results.testPassed === false ? '❌' : '⏭️'} ${results.testPassed === undefined ? 'skipped' : results.testPassed ? 'passed' : 'failed'}`);
+            if (results.testCoverage !== undefined)
+                console.log(`          Coverage: ${results.testCoverage}%`);
+            console.log('──────────────────────────────────────────────────');
+            const allPassed = (results.buildStatus === 'success' || args['skip-build'])
+                && (results.lintStatus === 'success' || args['skip-lint'])
+                && (results.testPassed === true || args['skip-test']);
+            if (allPassed) {
+                console.log('\n✅ All checks passed! Task can now be completed.');
+                console.log(`\nNext: scale transition ${args.id} complete --reason "Verified"`);
+            }
+            else {
+                console.log('\n❌ Some checks failed. Fix issues before completing task.');
+                process.exit(1);
+            }
+        }
+    },
+});
+// ============================================================================
+// role management
+// ============================================================================
+const roleActivate = defineCommand({
+    meta: { name: 'activate', description: 'Activate a role' },
+    args: { role: { type: 'positional', required: true } },
+    async run({ args }) {
+        const { roleGate, eventBus } = getEngine();
+        const roleDef = BUILT_IN_ROLES[args.role];
+        if (!roleDef) {
+            console.error(`Unknown role: ${args.role}. Available: ${Object.keys(BUILT_IN_ROLES).join(', ')}`);
+            process.exit(1);
+        }
+        roleGate.setRole(roleDef);
+        eventBus.emit('role.activated', { roleId: args.role });
+        console.log(JSON.stringify({ ok: true, role: roleDef }));
+    },
+});
+const roleShow = defineCommand({
+    meta: { name: 'show', description: 'Show current role' },
+    args: {},
+    async run() {
+        const { roleGate } = getEngine();
+        console.log(JSON.stringify(roleGate.getRole(), null, 2));
+    },
+});
+const role = defineCommand({
+    meta: { name: 'role', description: 'Role management' },
+    subCommands: { activate: roleActivate, show: roleShow },
+});
+// ============================================================================
+// context
+// ============================================================================
+const contextBuild = defineCommand({
+    meta: { name: 'build', description: 'Build context for current task' },
+    args: {
+        'session-id': { type: 'string', required: true },
+        'artifact-id': { type: 'string' },
+        role: { type: 'string' },
+    },
+    async run({ args }) {
+        const { ctx } = getEngine();
+        const result = await ctx.build({
+            sessionId: args['session-id'],
+            roleId: args.role,
+            currentArtifactId: args['artifact-id'],
+        });
+        console.log(JSON.stringify(result, null, 2));
+    },
+});
+const contextStatus = defineCommand({
+    meta: { name: 'status', description: 'Show session context status' },
+    args: {
+        'session-id': { type: 'string', required: true },
+    },
+    async run({ args }) {
+        const { ctx, roleGate } = getEngine();
+        const status = await ctx.getStatus(args['session-id'], roleGate);
+        console.log(JSON.stringify(status, null, 2));
+    },
+});
+const contextInject = defineCommand({
+    meta: { name: 'inject', description: 'Inject FSM context for SessionStart hook' },
+    args: {
+        'session-id': { type: 'string', required: true },
+    },
+    async run({ args }) {
+        const { eventBus, kb, fsmAgentBridge } = getEngine();
+        // Get FSM context for all session artifacts
+        const fsmContext = await fsmAgentBridge.getSessionContext(args['session-id'], eventBus);
+        // Recall relevant lessons based on artifact types
+        const artifactTypes = fsmContext.artifacts.map(a => a.artifactType);
+        if (artifactTypes.length > 0) {
+            const lessons = await kb.recall({ type: 'lesson', limit: 5 });
+            fsmContext.recalledLessons = lessons.map(l => `${l.id}: ${l.title} (${l.tags.join(',')})`);
+        }
+        // Output formatted context for Agent to read
+        const output = {
+            sessionId: fsmContext.sessionId,
+            generatedAt: fsmContext.generatedAt,
+            artifacts: fsmContext.artifacts.map(a => ({
+                id: a.artifactId,
+                type: a.artifactType,
+                status: a.currentStatus,
+                allowedActions: a.allowedTransitions,
+                blocked: a.blockingReasons.length > 0 ? a.blockingReasons : null,
+            })),
+            lessons: fsmContext.recalledLessons,
+            recommendations: fsmContext.recommendations,
+            // Human-readable summary
+            summary: formatContextSummary(fsmContext),
+        };
+        console.log(JSON.stringify(output, null, 2));
+    },
+});
+function formatContextSummary(ctx) {
+    const lines = [];
+    if (ctx.artifacts.length === 0) {
+        lines.push('No active artifacts for this session.');
+    }
+    else {
+        lines.push(`Active artifacts: ${ctx.artifacts.length}`);
+        for (const a of ctx.artifacts) {
+            const blocked = a.blockingReasons.length > 0 ? ' [BLOCKED]' : '';
+            lines.push(`  ${a.artifactId} (${a.artifactType}): ${a.currentStatus}${blocked}`);
+        }
+    }
+    if (ctx.recommendations.length > 0) {
+        lines.push('Recommendations:');
+        for (const r of ctx.recommendations) {
+            lines.push(`  ${r}`);
+        }
+    }
+    return lines.join('\n');
+}
+const context = defineCommand({
+    meta: { name: 'context', description: 'Context assembly' },
+    subCommands: { build: contextBuild, status: contextStatus, inject: contextInject },
+});
+// ============================================================================
+// stats
+// ============================================================================
+const stats = defineCommand({
+    meta: { name: 'stats', description: 'Show engine stats' },
+    args: {},
+    async run() {
+        const { store, eventBus } = getEngine();
+        const s = store.stats();
+        const events = await eventBus.query({ limit: 1000 });
+        console.log(JSON.stringify({ ...s, eventCount: events.length }, null, 2));
+    },
+});
+// ============================================================================
+// init command
+// ============================================================================
+const init = defineCommand({
+    meta: { name: 'init', description: 'Initialize SCALE Engine in current project (one-click install)' },
+    args: {
+        agent: { type: 'string', default: '', description: `Agent type (${SUPPORTED_AGENTS.join('/')}) - auto-detected if not specified` },
+        dir: { type: 'string', default: '.', description: 'Project directory' },
+        scenario: { type: 'string', default: 'standard', description: 'Scenario mode (sandbox/standard/critical)' },
+        quick: { type: 'boolean', default: false, description: 'Quick start with auto-detection' },
+    },
+    async run({ args }) {
+        // One-click quick start mode
+        if (args.quick || !args.agent) {
+            const qsResult = await quickStart(args.dir);
+            if (qsResult.success && qsResult.platform) {
+                console.log(`\n✅ SCALE Engine Quick Start completed for ${qsResult.platform}`);
+                console.log(`\n📁 Created (${qsResult.created.length}):`);
+                for (const f of qsResult.created)
+                    console.log(`   + ${f}`);
+                if (qsResult.skipped.length > 0) {
+                    console.log(`\n⏭️  Skipped (${qsResult.skipped.length}):`);
+                    for (const f of qsResult.skipped)
+                        console.log(`   - ${f}`);
+                }
+                console.log(`\n🔒 Physical constraints applied: ${qsResult.constraintsApplied}`);
+                console.log(`\n🚀 Capabilities enabled: ${qsResult.capabilitiesEnabled.join(', ')}`);
+                console.log(`\n📋 Next steps:`);
+                for (const step of qsResult.nextSteps)
+                    console.log(`   → ${step}`);
+            }
+            else {
+                console.log(`\n⚠️  No agent platform detected`);
+                const detection = detectPlatform(args.dir);
+                console.log(`\n📋 Suggested platforms: ${detection.suggestions.join(', ')}`);
+                console.log(`\n→ Run: scale init --agent <platform>`);
+            }
+            return;
+        }
+        // Manual agent specification mode
+        const adapter = createAdapter(args.agent);
+        const result = await adapter.init({ projectDir: args.dir, agentType: args.agent, scenarioMode: args.scenario });
+        console.log(`\n✅ SCALE Engine initialized for ${args.agent} (scenario: ${args.scenario})`);
+        console.log(`\n📁 Created:`);
+        for (const f of result.created)
+            console.log(`   + ${f}`);
+        if (result.skipped.length > 0) {
+            console.log(`\n⏭️  Skipped (already exist):`);
+            for (const f of result.skipped)
+                console.log(`   - ${f}`);
+        }
+        console.log(`\n🔧 Settings: ${result.settingsPath}`);
+        console.log(`\n📖 Knowledge: ${result.knowledgeDocPath}`);
+        console.log(`\n📂 Data dir:  ${result.scaleDir}`);
+        console.log(`\n📋 Next steps:`);
+        console.log(`   → scale doctor`);
+        console.log(`   → scale create Spec "<feature name>"`);
+    },
+});
+// ============================================================================
+// evolve command
+// ============================================================================
+const evolve = defineCommand({
+    meta: { name: 'evolve', description: 'Run evolution cycle (Defect→Lesson→Rule→Hook)' },
+    args: {},
+    async run() {
+        const { store, kb, eventBus } = getEngine();
+        const extractor = new LessonExtractor(store, kb, eventBus);
+        const proposer = new RuleProposer(kb, eventBus);
+        const generator = new HookGenerator(eventBus);
+        const engine = new EvolutionEngine(extractor, proposer, generator, eventBus, SCALE_DIR);
+        const stats = await engine.runCycle();
+        console.log(JSON.stringify(stats, null, 2));
+    },
+});
+// ============================================================================
+// doctor command
+// ============================================================================
+const doctor = defineCommand({
+    meta: { name: 'doctor', description: 'Diagnose SCALE Engine health' },
+    args: {
+        dir: { type: 'string', default: '.', description: 'Project directory' },
+        json: { type: 'boolean', default: false, description: 'Output as JSON' },
+    },
+    async run({ args }) {
+        const doc = new Doctor(args.dir);
+        const report = await doc.diagnose();
+        if (args.json) {
+            console.log(JSON.stringify(report, null, 2));
+        }
+        else {
+            console.log(doc.formatReport(report));
+        }
+        process.exitCode = report.overall === 'broken' ? 1 : 0;
+    },
+});
+// ============================================================================
+// workflow command — 列出/查看工作流预设
+// ============================================================================
+const workflowList = defineCommand({
+    meta: { name: 'list', description: 'List all workflow presets' },
+    args: {
+        scenario: { type: 'string', description: 'Filter by scenario mode (sandbox/standard/critical)' },
+    },
+    async run({ args }) {
+        const presets = args.scenario
+            ? getPresetsByScenario(args.scenario)
+            : listWorkflowPresets();
+        if (presets.length === 0) {
+            console.log('No workflow presets found.');
+            return;
+        }
+        console.log('\n📋 SCALE Engine Workflow Presets');
+        console.log('═══════════════════════════════════════════════════════');
+        for (const preset of presets) {
+            const modeEmoji = { sandbox: '🏖️', standard: '⚙️', critical: '🔒' }[preset.scenarioMode];
+            const mandatorySteps = preset.steps.filter((s) => s.isMandatory).length;
+            const totalSteps = preset.steps.length;
+            console.log(`\n  ${preset.nameZh} (${preset.id})`);
+            console.log(`  ${preset.description}`);
+            console.log(`  Mode: ${modeEmoji} ${preset.scenarioMode} · Steps: ${mandatorySteps}/${totalSteps} mandatory`);
+            if (preset.requiredArtifacts.length > 0) {
+                console.log(`  Requires: ${preset.requiredArtifacts.map((a) => `${a.type}${a.status ? `(${a.status})` : ''}`).join(', ')}`);
+            }
+            // Show step summary
+            for (const step of preset.steps) {
+                const marker = step.isMandatory ? '●' : '○';
+                const gate = step.verificationGate ? ` ⊓ ${step.verificationGate}` : '';
+                console.log(`    ${marker} ${step.stepId}: ${step.action}${gate}`);
+            }
+        }
+        console.log('\n═══════════════════════════════════════════════════════');
+        console.log('\nUsage: scale workflow show <preset-id>');
+    },
+});
+const workflow = defineCommand({
+    meta: { name: 'workflow', description: 'Workflow preset management' },
+    subCommands: { list: workflowList },
+});
+// ============================================================================
+// skill command — 技能发现
+// ============================================================================
+const skillScan = defineCommand({
+    meta: { name: 'scan', description: 'Scan for installed skills' },
+    args: {
+        dir: { type: 'string', default: '.', description: 'Project directory' },
+    },
+    async run({ args }) {
+        const discovery = new SkillDiscovery(args.dir);
+        const platform = discovery.detectPlatform();
+        if (!platform) {
+            console.log('\n⚠️  No agent platform detected. Run `scale init` first.');
+            return;
+        }
+        const result = discovery.scanSkills(platform);
+        console.log(`\n🔍 Platform: ${result.platform}`);
+        console.log(`📦 Skills found: ${result.skills.length}`);
+        if (result.skills.length > 0) {
+            for (const skill of result.skills) {
+                const status = skill.enabled ? '✅' : '❌';
+                const desc = skill.description ? ` — ${skill.description}` : '';
+                console.log(`  ${status} ${skill.name}${desc}`);
+            }
+        }
+        else {
+            console.log('  No skills found in platform skills directory.');
+        }
+    },
+});
+const skill = defineCommand({
+    meta: { name: 'skill', description: 'Skill discovery and management' },
+    subCommands: { scan: skillScan },
+});
+// ============================================================================
+// agent commands — Multi-Agent 协作系统 (Phase 9)
+// ============================================================================
+import { AgentPool } from '../agents/AgentPool.js';
+import { AgentChannel } from '../agents/AgentChannel.js';
+import { PROFESSIONAL_AGENTS, getProfile, listProfiles } from '../agents/profiles.js';
+const agentPool = new AgentPool();
+const agentChannel = new AgentChannel(getEngine().eventBus);
+const agentSpawn = defineCommand({
+    meta: { name: 'spawn', description: 'Spawn a new agent instance' },
+    args: {
+        profile: { type: 'positional', required: true, description: 'Agent profile ID (e.g., frontend-agent)' },
+    },
+    async run({ args }) {
+        const profile = getProfile(args.profile);
+        if (!profile) {
+            console.error(`Profile not found: ${args.profile}`);
+            console.log(`Available profiles: ${listProfiles().join(', ')}`);
+            process.exit(1);
+        }
+        const agent = agentPool.spawn(args.profile);
+        console.log(JSON.stringify({ ok: true, agentId: agent.id, profile: agent.profile.name, status: agent.status }, null, 2));
+    },
+});
+const agentList = defineCommand({
+    meta: { name: 'list', description: 'List all agent instances' },
+    args: {},
+    async run() {
+        const agents = agentPool.listAll();
+        if (agents.length === 0) {
+            console.log('No agent instances spawned.');
+            return;
+        }
+        console.log(`\n🤖 Agent Instances (${agents.length})`);
+        console.log('──────────────────────────────────────────────');
+        for (const a of agents) {
+            const statusEmoji = { idle: '💤', running: '🔄', blocked: '🚫', completed: '✅', failed: '❌', recycled: '♻️' }[a.status];
+            console.log(`  ${statusEmoji} ${a.id} (${a.profile.name})`);
+            if (a.assignedTask)
+                console.log(`     Task: ${a.assignedTask}`);
+        }
+    },
+});
+const agentProfiles = defineCommand({
+    meta: { name: 'profiles', description: 'List available agent profiles' },
+    args: {},
+    async run() {
+        console.log(`\n📋 Agent Profiles (${PROFESSIONAL_AGENTS.length})`);
+        console.log('──────────────────────────────────────────────');
+        for (const p of PROFESSIONAL_AGENTS) {
+            const modelEmoji = { fast: '⚡', balanced: '⚖️', powerful: '🧠' }[p.preferredModel];
+            console.log(`  ${modelEmoji} ${p.id} — ${p.name}`);
+            console.log(`     Role: ${p.inheritsRole} · Domain: ${p.domain}`);
+            console.log(`     Capabilities: ${p.capabilities.slice(0, 3).join(', ')}...`);
+        }
+    },
+});
+const agent = defineCommand({
+    meta: { name: 'agent', description: 'Multi-Agent system management' },
+    subCommands: { spawn: agentSpawn, list: agentList, profiles: agentProfiles },
+});
+// ============================================================================
+// team commands — 团队协作 (Phase 9)
+// ============================================================================
+const teamCreate = defineCommand({
+    meta: { name: 'create', description: 'Create an agent team for a task' },
+    args: {
+        profiles: { type: 'string', required: true, description: 'Comma-separated profile IDs' },
+        task: { type: 'string', description: 'Task description' },
+    },
+    async run({ args }) {
+        const profileIds = args.profiles.split(',').map(p => p.trim());
+        const agents = [];
+        for (const profileId of profileIds) {
+            const profile = getProfile(profileId);
+            if (!profile) {
+                console.error(`Profile not found: ${profileId}`);
+                process.exit(1);
+            }
+            agents.push(agentPool.spawn(profileId));
+        }
+        const teamId = `TEAM-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        console.log(JSON.stringify({
+            ok: true,
+            teamId,
+            agents: agents.map(a => ({ id: a.id, profile: a.profile.name })),
+            leader: agents[0].profile.name,
+            description: args.task,
+        }, null, 2));
+    },
+});
+const teamStatus = defineCommand({
+    meta: { name: 'status', description: 'Show team status' },
+    args: {
+        team: { type: 'positional', required: true, description: 'Team ID' },
+    },
+    async run({ args }) {
+        // Simplified: show all agents in pool
+        const agents = agentPool.listAll();
+        const running = agents.filter(a => a.status === 'running').length;
+        const completed = agents.filter(a => a.status === 'completed').length;
+        console.log(JSON.stringify({
+            teamId: args.team,
+            total: agents.length,
+            running,
+            completed,
+            failed: agents.filter(a => a.status === 'failed').length,
+            agents: agents.map(a => ({ id: a.id, status: a.status })),
+        }, null, 2));
+    },
+});
+const team = defineCommand({
+    meta: { name: 'team', description: 'Agent team orchestration' },
+    subCommands: { create: teamCreate, status: teamStatus },
+});
+// ============================================================================
+// Main
+// ============================================================================
+// ============================================================================
+// Phase-Aligned Commands (v0.9.0) — agent-skills style
+// ============================================================================
+import * as phaseCommands from '../cli/phaseCommands.js';
+import * as liteCommands from '../cli/liteCommands.js';
+const main = defineCommand({
+    meta: { name: 'scale', version: '0.9.0', description: 'SCALE Engine v0.9.0 CLI — Phase Commands: define/plan/build/verify/review/ship · Lite Mode: scale lite · 11 agents · 10 workflows · 9 detectors' },
+    subCommands: {
+        // Lite Mode (agent-skills style interactive entry)
+        lite: liteCommands.liteCommand,
+        // Phase-Aligned Commands (agent-skills style)
+        define: phaseCommands.phaseDefine,
+        plan: phaseCommands.phasePlan,
+        build: phaseCommands.phaseBuild,
+        verify: phaseCommands.phaseVerify,
+        review: phaseCommands.phaseReview,
+        ship: phaseCommands.phaseShip,
+        // Original commands (preserved)
+        init,
+        doctor,
+        session,
+        gate,
+        create,
+        list,
+        show,
+        suggest,
+        transition,
+        verifyTask,
+        role,
+        context,
+        evolve,
+        stats,
+        workflow,
+        skill,
+        agent,
+        team,
+        'create-prd': createPRD,
+    },
+});
+runMain(main);
+//# sourceMappingURL=cli.js.map

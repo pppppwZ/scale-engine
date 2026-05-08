@@ -1,0 +1,222 @@
+// SCALE Engine — MCP Server (W11)
+// Model Context Protocol server over stdio
+// Exposes SCALE artifacts, transitions, and context as MCP tools
+import { EventBus } from '../core/eventBus.js';
+import { InMemoryArtifactStore } from '../artifact/store.js';
+import { FSM } from '../artifact/fsm.js';
+import { registerAllFSMs, INITIAL_STATES } from '../artifact/fsmDefinitions.js';
+import { KnowledgeBase } from '../knowledge/KnowledgeBase.js';
+import { ContextBuilder } from '../context/ContextBuilder.js';
+import { wireEffects } from '../orchestration/EffectsWiring.js';
+import { existsSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+// ============================================================================
+// SCALE MCP Server
+// ============================================================================
+export class ScaleMCPServer {
+    constructor(scaleDir = '.scale') {
+        const eventsDir = join(scaleDir, 'events');
+        const artifactsDir = join(scaleDir, 'artifacts');
+        for (const d of [eventsDir, artifactsDir]) {
+            if (!existsSync(d))
+                mkdirSync(d, { recursive: true });
+        }
+        this.bus = new EventBus({ eventsDir });
+        this.store = new InMemoryArtifactStore(this.bus, { artifactsDir });
+        this.fsm = new FSM(this.store, this.bus);
+        registerAllFSMs(this.fsm);
+        wireEffects(this.fsm, this.store, this.bus);
+        this.kb = new KnowledgeBase(this.bus);
+        this.ctx = new ContextBuilder(this.store, this.kb, this.bus);
+    }
+    getTools() {
+        return [
+            {
+                name: 'scale_create',
+                description: 'Create a new SCALE artifact (Spec, Plan, Task, Defect, etc.)',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        type: { type: 'string', enum: Object.keys(INITIAL_STATES), description: 'Artifact type' },
+                        title: { type: 'string', description: 'Artifact title' },
+                        payload: { type: 'object', description: 'Type-specific payload' },
+                    },
+                    required: ['type', 'title'],
+                },
+            },
+            {
+                name: 'scale_transition',
+                description: 'Transition an artifact to a new state via FSM action',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        artifactId: { type: 'string', description: 'Artifact ID' },
+                        action: { type: 'string', description: 'FSM action name' },
+                        reason: { type: 'string', description: 'Reason for transition' },
+                    },
+                    required: ['artifactId', 'action'],
+                },
+            },
+            {
+                name: 'scale_list',
+                description: 'List artifacts with optional filters',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        type: { type: 'string', description: 'Filter by type' },
+                        status: { type: 'string', description: 'Filter by status' },
+                        limit: { type: 'number', description: 'Max results', default: 20 },
+                    },
+                },
+            },
+            {
+                name: 'scale_show',
+                description: 'Show artifact details',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        artifactId: { type: 'string', description: 'Artifact ID' },
+                    },
+                    required: ['artifactId'],
+                },
+            },
+            {
+                name: 'scale_available_actions',
+                description: 'Get available FSM actions for an artifact',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        artifactId: { type: 'string', description: 'Artifact ID' },
+                    },
+                    required: ['artifactId'],
+                },
+            },
+            {
+                name: 'scale_context',
+                description: 'Build context for current session',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        sessionId: { type: 'string', description: 'Session ID' },
+                        artifactId: { type: 'string', description: 'Current artifact ID' },
+                        roleId: { type: 'string', description: 'Current role' },
+                    },
+                    required: ['sessionId'],
+                },
+            },
+            {
+                name: 'scale_stats',
+                description: 'Get engine statistics',
+                inputSchema: { type: 'object', properties: {} },
+            },
+        ];
+    }
+    async handleToolCall(name, args) {
+        const actor = { kind: 'system', component: 'mcp-client' };
+        switch (name) {
+            case 'scale_create': {
+                const type = args.type;
+                const title = args.title;
+                const payload = args.payload ?? {};
+                const artifact = await this.store.create({
+                    type: type,
+                    title,
+                    payload,
+                    initialStatus: INITIAL_STATES[type],
+                    createdBy: actor,
+                });
+                return { id: artifact.id, type: artifact.type, title: artifact.title, status: artifact.status };
+            }
+            case 'scale_transition': {
+                const id = args.artifactId;
+                const action = args.action;
+                const reason = args.reason;
+                const result = await this.fsm.transition(id, action, { actor, reason });
+                return {
+                    success: result.success,
+                    status: result.artifact?.status,
+                    blockedBy: result.blockedBy,
+                    effectsExecuted: result.effectsExecuted,
+                };
+            }
+            case 'scale_list': {
+                const artifacts = await this.store.query({
+                    type: args.type,
+                    status: args.status,
+                    limit: args.limit ?? 20,
+                });
+                return artifacts.map((a) => ({
+                    id: a.id, type: a.type, title: a.title, status: a.status,
+                }));
+            }
+            case 'scale_show': {
+                const artifact = await this.store.get(args.artifactId);
+                if (!artifact)
+                    return { error: 'Artifact not found' };
+                return artifact;
+            }
+            case 'scale_available_actions': {
+                const actions = await this.fsm.availableActions(args.artifactId);
+                return { artifactId: args.artifactId, actions };
+            }
+            case 'scale_context': {
+                const ctx = await this.ctx.build({
+                    sessionId: args.sessionId,
+                    currentArtifactId: args.artifactId,
+                    roleId: args.roleId,
+                });
+                return ctx;
+            }
+            case 'scale_stats': {
+                const all = await this.store.query({ limit: 10000 });
+                const byType = {};
+                for (const a of all)
+                    byType[a.type] = (byType[a.type] ?? 0) + 1;
+                const events = await this.bus.query({ limit: 1000 });
+                return { artifactCount: all.length, byType, eventCount: events.length };
+            }
+            default:
+                throw new Error(`Unknown tool: ${name}`);
+        }
+    }
+    async handleRequest(request) {
+        try {
+            switch (request.method) {
+                case 'initialize':
+                    return {
+                        jsonrpc: '2.0', id: request.id,
+                        result: {
+                            protocolVersion: '2024-11-05',
+                            capabilities: { tools: {} },
+                            serverInfo: { name: 'scale-engine', version: '0.1.0' },
+                        },
+                    };
+                case 'tools/list':
+                    return {
+                        jsonrpc: '2.0', id: request.id,
+                        result: { tools: this.getTools() },
+                    };
+                case 'tools/call': {
+                    const params = request.params;
+                    const result = await this.handleToolCall(params.name, params.arguments ?? {});
+                    return {
+                        jsonrpc: '2.0', id: request.id,
+                        result: { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] },
+                    };
+                }
+                default:
+                    return {
+                        jsonrpc: '2.0', id: request.id,
+                        error: { code: -32601, message: `Method not found: ${request.method}` },
+                    };
+            }
+        }
+        catch (e) {
+            return {
+                jsonrpc: '2.0', id: request.id,
+                error: { code: -32000, message: e.message },
+            };
+        }
+    }
+}
+//# sourceMappingURL=mcp.js.map

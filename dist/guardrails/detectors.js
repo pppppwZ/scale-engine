@@ -1,0 +1,230 @@
+// SCALE Engine — 5 种懒惰检测器
+// 设计参考：docs/03-CORE-MODULES.md §3.5
+import { createHash } from 'node:crypto';
+const hashArgs = (args) => createHash('md5').update(JSON.stringify(args)).digest('hex').slice(0, 8);
+// 1. 暴力重试检测
+export class BruteRetryDetector {
+    constructor() {
+        this.name = 'brute-retry';
+        this.windowMs = 3 * 60 * 1000;
+        this.threshold = 3;
+    }
+    async check(input, ctx) {
+        const key = `${input.sessionId}:${input.tool}:${hashArgs(input.args)}`;
+        const history = ctx.cache.get(key) ?? [];
+        const recent = history.filter((t) => Date.now() - t < this.windowMs);
+        recent.push(Date.now());
+        ctx.cache.set(key, recent);
+        if (recent.length >= this.threshold) {
+            ctx.eventBus.emit('behavior.brute_retry', { tool: input.tool, count: recent.length }, { sessionId: input.sessionId });
+            return {
+                triggered: true,
+                severity: 'block',
+                reason: `检测到「暴力重试」：${input.tool} 在 ${this.windowMs / 60000} 分钟内已运行 ${recent.length} 次。请换策略，并说明你这次的新假设是什么。`,
+            };
+        }
+        return { triggered: false };
+    }
+}
+// 2. 工具闲置检测
+export class IdleToolDetector {
+    constructor() {
+        this.name = 'idle-tool';
+    }
+    async check(input, ctx) {
+        if (!['Edit', 'Write', 'MultiEdit'].includes(input.tool))
+            return { triggered: false };
+        const recent = await ctx.eventBus.query({
+            sessionId: input.sessionId,
+            types: ['tool.failed', 'tool.completed'],
+            limit: 10,
+        });
+        const failureIdx = recent.findIndex((e) => e.type === 'tool.failed');
+        if (failureIdx < 0)
+            return { triggered: false };
+        const after = recent.slice(0, failureIdx);
+        const investigation = ['Read', 'Grep', 'WebSearch', 'Bash'];
+        const hasInv = after.some((e) => investigation.includes(e.payload.tool));
+        if (!hasInv) {
+            ctx.eventBus.emit('behavior.idle_tool', { tool: input.tool }, { sessionId: input.sessionId });
+            return {
+                triggered: true,
+                severity: 'warn',
+                reason: '检测到「工具闲置」：上次工具失败后未读任何文件/日志就直接改代码。请先 Read 相关文件或 Bash 看错误日志。',
+                suggestion: 'Read failing test output OR Grep for similar patterns',
+            };
+        }
+        return { triggered: false };
+    }
+}
+// 3. 忙碌假象（来回反复修改同一文件）
+export class BusyLoopDetector {
+    constructor() {
+        this.name = 'busy-loop';
+    }
+    async check(input, ctx) {
+        if (input.tool !== 'Edit')
+            return { triggered: false };
+        const file = input.args.file_path;
+        if (!file)
+            return { triggered: false };
+        const edits = await ctx.eventBus.query({
+            sessionId: input.sessionId,
+            types: ['tool.completed'],
+            filter: (e) => {
+                const p = e.payload;
+                return p.tool === 'Edit' && p.args.file_path === file;
+            },
+            limit: 5,
+        });
+        if (edits.length < 4)
+            return { triggered: false };
+        const seen = new Set();
+        let cycle = false;
+        for (const e of edits) {
+            const p = e.payload;
+            const oldH = createHash('md5').update(p.args.old_string ?? '').digest('hex').slice(0, 8);
+            const newH = createHash('md5').update(p.args.new_string ?? '').digest('hex').slice(0, 8);
+            if (seen.has(`${newH}:${oldH}`)) {
+                cycle = true;
+                break;
+            }
+            seen.add(`${oldH}:${newH}`);
+        }
+        if (cycle) {
+            ctx.eventBus.emit('behavior.busy_loop', { file }, { sessionId: input.sessionId });
+            return {
+                triggered: true,
+                severity: 'block',
+                reason: `检测到「忙碌假象」：你在 ${file} 反复来回修改。停下来——这次修改是否产生新信息？没有 = 换思路。`,
+            };
+        }
+        return { triggered: false };
+    }
+}
+// 4. 声称完成但未验证（Harness Engineering 增强）
+// 文章启发："CI 通过但测试 0/0 是无效的"
+export class PrematureDoneDetector {
+    constructor() {
+        this.name = 'premature-done';
+    }
+    async check(input, ctx) {
+        const edits = await ctx.eventBus.query({
+            sessionId: input.sessionId,
+            types: ['tool.completed'],
+            filter: (e) => ['Edit', 'Write', 'MultiEdit'].includes(e.payload.tool),
+        });
+        if (edits.length === 0)
+            return { triggered: false };
+        // Harness: 检查验证命令是否运行
+        const verifications = await ctx.eventBus.query({
+            sessionId: input.sessionId,
+            types: ['tool.completed'],
+            filter: (e) => {
+                const p = e.payload;
+                return p.tool === 'Bash' && /test|lint|build|typecheck/i.test(p.args.command ?? '');
+            },
+        });
+        // 情况1：完全未验证
+        if (verifications.length === 0) {
+            ctx.eventBus.emit('behavior.premature_done', { reason: 'no_verification' }, { sessionId: input.sessionId });
+            return {
+                triggered: true,
+                severity: 'block',
+                reason: '检测到「声称完成但未验证」：本会话修改了代码，但未运行任何 test/lint/build。请先运行验证命令。',
+                suggestion: 'pnpm test && pnpm lint && pnpm build',
+            };
+        }
+        // 情况2：验证在编辑之前（文章：Premature Victory Declaration）
+        const lastVerify = verifications[0];
+        const lastEdit = edits[0];
+        if (lastVerify.timestamp < lastEdit.timestamp) {
+            return {
+                triggered: true,
+                severity: 'block',
+                reason: '修改了代码但最后一次验证是修改之前运行的。请重新运行验证。',
+            };
+        }
+        // 情况3：Harness 新增 - 检查测试结果是否真正通过
+        // 文章启发：Agent 可能认为 "SUCCESS" 就通过，但实际测试 0/0
+        const testCmd = verifications.find(e => {
+            const p = e.payload;
+            return /test/i.test(p.args.command ?? '');
+        });
+        if (testCmd) {
+            const output = testCmd.payload.output ?? '';
+            // 检测测试 0/0 异常
+            if (/tests?\s*(0|no\s*tests?)/i.test(output) || /passed:\s*0/i.test(output)) {
+                ctx.eventBus.emit('behavior.premature_done', { reason: 'empty_tests' }, { sessionId: input.sessionId });
+                return {
+                    triggered: true,
+                    severity: 'block',
+                    reason: '检测到「测试为空」：运行了测试命令但测试数为 0。请确保测试文件存在且被正确执行。',
+                    suggestion: '检查测试文件是否存在，或添加测试用例',
+                };
+            }
+            // 检测失败测试
+            if (/failed:\s*[1-9]/i.test(output) || /FAIL/i.test(output)) {
+                ctx.eventBus.emit('behavior.premature_done', { reason: 'tests_failed' }, { sessionId: input.sessionId });
+                return {
+                    triggered: true,
+                    severity: 'block',
+                    reason: '检测到「测试失败」：存在失败的测试，不能声称完成。',
+                    suggestion: '修复失败的测试后重新运行',
+                };
+            }
+        }
+        // 情况4：Harness 新增 - 检查编译是否通过
+        const buildCmd = verifications.find(e => {
+            const p = e.payload;
+            return /build|compile|tsc/i.test(p.args.command ?? '');
+        });
+        if (buildCmd) {
+            const exitCode = buildCmd.payload.exitCode ?? 0;
+            if (exitCode !== 0) {
+                ctx.eventBus.emit('behavior.premature_done', { reason: 'build_failed' }, { sessionId: input.sessionId });
+                return {
+                    triggered: true,
+                    severity: 'block',
+                    reason: '检测到「编译失败」：build 命令返回非零退出码。',
+                    suggestion: '修复编译错误后重新构建',
+                };
+            }
+        }
+        return { triggered: false };
+    }
+}
+// 5. 甩锅检测
+export class BlameShiftDetector {
+    constructor() {
+        this.name = 'blame-shift';
+        this.patterns = [
+            /可能是环境问题/i,
+            /建议你?手动/i,
+            /maybe (an?|the) (environment|version|setup)/i,
+            /not sure why/i,
+            /unable to (determine|figure out|resolve)/i,
+        ];
+    }
+    async check(input, ctx) {
+        const text = input.output ?? '';
+        if (!this.patterns.some((p) => p.test(text)))
+            return { triggered: false };
+        const verifications = await ctx.eventBus.query({
+            sessionId: input.sessionId,
+            types: ['tool.completed'],
+            filter: (e) => e.payload.tool === 'Bash',
+            limit: 5,
+        });
+        if (verifications.length < 2) {
+            ctx.eventBus.emit('behavior.blame_shift', { sessionId: input.sessionId }, { sessionId: input.sessionId });
+            return {
+                triggered: true,
+                severity: 'warn',
+                reason: '检测到「甩锅」迹象：你说"可能是环境问题"但未做足够验证。至少：\n1. 验证版本 2. 验证依赖 3. 重现问题。\n证据齐了再下结论。',
+            };
+        }
+        return { triggered: false };
+    }
+}
+//# sourceMappingURL=detectors.js.map
