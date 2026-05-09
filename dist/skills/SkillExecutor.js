@@ -1,5 +1,6 @@
 // SCALE Engine — Skill Executor (v0.9.0)
 // 技能执行器：执行不同类型的技能 + MCP 能力集成
+import { skillsInvoker } from "../capabilities/InstalledSkillsIntegration.js";
 import { spawn } from "node:child_process";
 import { platform } from "node:os";
 export class SkillExecutor {
@@ -152,24 +153,22 @@ export class SkillExecutor {
         this.registerBuiltinFunction("tdd_check", async (_input) => ({ checked: true, hasTest: true }));
         this.registerBuiltinFunction("debug_suggest", async (_input) => ({ suggestions: ["Check error message"] }));
         this.registerBuiltinFunction("verify_status", async (_input) => ({ verified: true }));
-        // Browser automation builtins
-        this.registerBuiltinFunction("browser_navigate", async (input) => {
-            if (!this.capabilityRegistry?.getBrowser())
-                return { error: "Browser not available" };
-            return { navigated: true, url: input.url };
-        });
-        // Search builtins
-        this.registerBuiltinFunction("web_search", async (input) => {
-            if (!this.capabilityRegistry?.getSearch())
-                return { error: "Search not available" };
-            return { query: input.query, results: [] };
-        });
-        // Computer control builtins
-        this.registerBuiltinFunction("computer_click", async (input) => {
-            if (!this.capabilityRegistry?.getComputer())
-                return { error: "Computer not available" };
-            return { clicked: true, coordinate: input.coordinate };
-        });
+        // ========== 真正调用已安装的外部技能 ==========
+        // web-access CDP browser automation
+        this.registerBuiltinFunction("web_access_targets", async () => skillsInvoker.webAccessTargets());
+        this.registerBuiltinFunction("web_access_new_tab", async (input) => skillsInvoker.webAccessNewTab(input.url));
+        this.registerBuiltinFunction("web_access_eval", async (input) => skillsInvoker.webAccessEval(input.targetId, input.js));
+        this.registerBuiltinFunction("web_access_click", async (input) => skillsInvoker.webAccessClick(input.targetId, input.selector));
+        this.registerBuiltinFunction("web_access_close", async (input) => skillsInvoker.webAccessClose(input.targetId));
+        // playwright CLI browser automation
+        this.registerBuiltinFunction("playwright_open", async (input) => skillsInvoker.playwrightOpen(input.url));
+        this.registerBuiltinFunction("playwright_snapshot", async () => skillsInvoker.playwrightSnapshot());
+        this.registerBuiltinFunction("playwright_click", async (input) => skillsInvoker.playwrightClick(input.ref));
+        // cua desktop automation
+        this.registerBuiltinFunction("cua_mouse_move", async (input) => skillsInvoker.cuaMouseMove(input.x, input.y));
+        this.registerBuiltinFunction("cua_screenshot", async () => skillsInvoker.cuaScreenshot());
+        // graphify knowledge graph
+        this.registerBuiltinFunction("graphify_build", async (input) => skillsInvoker.graphifyBuild(input.dir));
     }
     runCommand(command, timeout) {
         return new Promise((resolve, reject) => {
