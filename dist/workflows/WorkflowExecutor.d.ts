@@ -42,6 +42,7 @@ export declare class WorkflowExecutor implements IWorkflowExecutor {
     private gateParser;
     private eventBus;
     private store;
+    private fsm;
     constructor(eventBus: IEventBus, store: IArtifactStore);
     start(preset: WorkflowPreset, context: Record<string, unknown>): Promise<WorkflowSession>;
     getStatus(sessionId: string): Promise<WorkflowSession | null>;
@@ -53,4 +54,7 @@ export declare class WorkflowExecutor implements IWorkflowExecutor {
     private executeAction;
     private getPresetStep;
     private getRelatedArtifact;
+    private contextKeyByType;
+    private resolveArtifactToken;
+    private defaultPayloadByType;
 }

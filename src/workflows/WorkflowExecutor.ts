@@ -1,9 +1,12 @@
 // SCALE Engine — Workflow Executor (v0.7.0)
 // 工作流执行器：执行预设工作流步骤
 
-import type { WorkflowPreset, WorkflowStep } from "../artifact/types.js"
+import type { WorkflowPreset, WorkflowStep, ArtifactType } from "../artifact/types.js"
 import type { IEventBus } from "../core/eventBus.js"
 import type { IArtifactStore } from "../artifact/store.js"
+import { FSM } from "../artifact/fsm.js"
+import { INITIAL_STATES, registerAllFSMs } from "../artifact/fsmDefinitions.js"
+import { getWorkflowPreset } from "./presets.js"
 import { GateParser, GateResult } from "./GateParser.js"
 import { logger } from "../core/logger.js"
 
@@ -50,10 +53,13 @@ export class WorkflowExecutor implements IWorkflowExecutor {
   private gateParser = new GateParser()
   private eventBus: IEventBus
   private store: IArtifactStore
+  private fsm: FSM
 
   constructor(eventBus: IEventBus, store: IArtifactStore) {
     this.eventBus = eventBus
     this.store = store
+    this.fsm = new FSM(store, eventBus)
+    registerAllFSMs(this.fsm)
   }
 
   async start(preset: WorkflowPreset, context: Record<string, unknown>): Promise<WorkflowSession> {
@@ -122,7 +128,6 @@ export class WorkflowExecutor implements IWorkflowExecutor {
       if (presetStep?.verificationGate) {
         const gateResult = await this.gateParser.evaluateString(presetStep.verificationGate, {
           artifact: await this.getRelatedArtifact(session.context),
-          runCommand: async (_cmd: string) => ({ success: true, output: "" })
         })
         step.gateResult = gateResult
         if (!gateResult.passed) {
@@ -171,26 +176,112 @@ export class WorkflowExecutor implements IWorkflowExecutor {
     return session?.stepHistory ?? []
   }
 
-  private async executeAction(_context: Record<string, unknown>, action: string): Promise<unknown> {
-    // 模拟执行，实际由 Agent 或 CLI 处理
-    if (action.startsWith("scale ")) return { command: action, executed: true }
-    return { action, result: "simulated" }
+  private async executeAction(context: Record<string, unknown>, action: string): Promise<unknown> {
+    if (!action.startsWith("scale ")) return { action, result: "simulated" }
+
+    const createMatch = action.match(/^scale\s+create\s+(\w+)$/)
+    if (createMatch) {
+      const type = createMatch[1] as ArtifactType
+      const created = await this.store.create({
+        type,
+        title: `${type} created by workflow`,
+        payload: this.defaultPayloadByType(type),
+        initialStatus: INITIAL_STATES[type],
+      })
+      context.artifactId = created.id
+      context[this.contextKeyByType(type)] = created.id
+      return { command: action, executed: true, artifactId: created.id, status: created.status }
+    }
+
+    const transitionMatch = action.match(/^scale\s+transition\s+(\S+)\s+(\w+)$/)
+    if (transitionMatch) {
+      const token = transitionMatch[1]
+      const transitionAction = transitionMatch[2]
+      const resolvedId = this.resolveArtifactToken(token, context)
+      if (!resolvedId) throw new Error(`Unable to resolve artifact token '${token}'`)
+
+      const result = await this.fsm.transition(resolvedId, transitionAction, {
+        actor: { kind: "system", component: "workflow-executor" },
+        reason: `Workflow step: ${action}`,
+      })
+      if (!result.success || !result.artifact) {
+        const message = result.blockedBy?.map(failure => failure.message).join("; ") ?? `Transition '${transitionAction}' blocked`
+        throw new Error(message)
+      }
+
+      context.artifactId = result.artifact.id
+      context[this.contextKeyByType(result.artifact.type)] = result.artifact.id
+      return { command: action, executed: true, artifactId: result.artifact.id, status: result.artifact.status }
+    }
+
+    return { command: action, executed: true }
   }
 
   private getPresetStep(presetId: string, stepIndex: number): WorkflowStep | undefined {
-    // 从 presets.ts 导入的预设中获取 - 简化版本
-    const presets: Record<string, WorkflowStep[]> = {
-      "basic-dev": [{ stepId: "explore", action: "explore", isMandatory: true }],
-      "tdd-dev": [{ stepId: "explore", action: "explore", isMandatory: true }],
-      "bug-fix": [{ stepId: "reproduce", action: "reproduce", isMandatory: true }],
-    }
-    return presets[presetId]?.[stepIndex]
+    return getWorkflowPreset(presetId)?.steps[stepIndex]
   }
 
   private async getRelatedArtifact(context: Record<string, unknown>): Promise<import("../artifact/types.js").Artifact | undefined> {
-    const artifactId = context.artifactId as string | undefined
-    if (!artifactId) return undefined
-    const artifact = await this.store.get(artifactId)
-    return artifact ?? undefined
+    const candidates = [
+      context.artifactId,
+      context.taskId,
+      context.planId,
+      context.testPlanId,
+      context.specId,
+      context.defectId,
+      context.changeId,
+      context.evidenceId,
+      context.needId,
+      context.insightId,
+      context.lessonId,
+      context.releaseId,
+    ].filter((v): v is string => typeof v === "string" && v.length > 0)
+
+    for (const id of candidates) {
+      const artifact = await this.store.get(id)
+      if (artifact) return artifact
+    }
+    return undefined
+  }
+
+  private contextKeyByType(type: ArtifactType): string {
+    const map: Record<ArtifactType, string> = {
+      Need: "needId",
+      Insight: "insightId",
+      Spec: "specId",
+      Plan: "planId",
+      TestPlan: "testPlanId",
+      Task: "taskId",
+      Change: "changeId",
+      Evidence: "evidenceId",
+      Defect: "defectId",
+      Lesson: "lessonId",
+      Release: "releaseId",
+    }
+    return map[type]
+  }
+
+  private resolveArtifactToken(token: string, context: Record<string, unknown>): string | undefined {
+    if (token !== "SPEC-xxx" && token !== "PLAN-xxx" && token !== "TASK-xxx") return token
+    if (token === "SPEC-xxx") return context.specId as string | undefined
+    if (token === "PLAN-xxx") return context.planId as string | undefined
+    if (token === "TASK-xxx") return context.taskId as string | undefined
+    return undefined
+  }
+
+  private defaultPayloadByType(type: ArtifactType): Record<string, unknown> {
+    if (type === "Spec") {
+      return {
+        what: "workflow-created spec",
+        successCriteria: ["defined"],
+        outOfScope: [],
+        edgeCases: [],
+        northStar: "defined",
+        ambiguityScore: 0,
+      }
+    }
+    if (type === "Plan") return { rollbackStrategy: "defined" }
+    if (type === "Defect") return { rootCauseCategory: "pending" }
+    return {}
   }
 }

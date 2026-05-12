@@ -13,28 +13,40 @@ export class GateParser {
             const [field, value] = expr.split(" " + op + " ");
             return { type: "status_check", field: field.trim(), operator: op, value: value.trim() };
         }
-        const compMatch = expr.match(/([a-zA-Z_]+)\s*(<=|>=|<|>|==)\s*([0-9.]+|[a-zA-Z_]+)/);
-        if (compMatch)
-            return { type: "comparison", field: compMatch[1], operator: compMatch[2], value: parseFloat(compMatch[3]) || compMatch[3] };
+        const normalized = expr.replace(/≤/g, "<=").replace(/≥/g, ">=");
+        const compMatch = normalized.match(/([a-zA-Z_][a-zA-Z0-9_.]*)\s*(<=|>=|<|>|==)\s*([0-9.]+|[a-zA-Z_][a-zA-Z0-9_.]*)/);
+        if (compMatch) {
+            const rawValue = compMatch[3];
+            const parsedValue = /^\d+(\.\d+)?$/.test(rawValue) ? Number(rawValue) : rawValue;
+            return { type: "comparison", field: compMatch[1], operator: compMatch[2], value: parsedValue };
+        }
+        const presenceMatch = expr.match(/^([a-zA-Z_][a-zA-Z0-9_.]*)\s+(present|identified|defined)$/);
+        if (presenceMatch) {
+            return { type: "presence_check", field: presenceMatch[1], operator: presenceMatch[2] };
+        }
         if (expr.includes(" pass") || expr.includes(" fails")) {
             const cmd = expr.replace(" pass", "").replace(" fails", "").trim();
             return { type: "command_check", command: cmd };
         }
         if (expr.includes("approval") || expr.includes("human"))
             return { type: "approval_check" };
-        return { type: "comparison", field: "unknown", operator: "==", value: "true" };
+        return { type: "unsupported", raw: expr };
     }
     async evaluate(expr, ctx) {
         if (expr.type === "comparison")
             return this.evalComparison(expr, ctx);
         if (expr.type === "status_check")
             return this.evalStatus(expr, ctx);
+        if (expr.type === "presence_check")
+            return this.evalPresence(expr, ctx);
         if (expr.type === "command_check")
             return this.evalCommand(expr, ctx);
         if (expr.type === "approval_check")
             return { passed: false, expression: "human approval", evaluated: expr, reason: "Requires human approval" };
         if (expr.type === "compound")
             return this.evalCompound(expr, ctx);
+        if (expr.type === "unsupported")
+            return { passed: false, expression: expr.raw ?? "", evaluated: expr, reason: "Unsupported gate expression" };
         return { passed: false, expression: "", evaluated: expr, reason: "Unknown type" };
     }
     async evaluateString(expr, ctx) {
@@ -44,10 +56,23 @@ export class GateParser {
         if (!ctx.artifact)
             return { passed: false, expression: "", evaluated: expr, reason: "No artifact" };
         const payload = ctx.artifact.payload;
-        const fieldValue = payload[expr.field ?? ""] ?? ctx.artifact[expr.field];
+        const fieldValue = this.resolveField(payload, ctx.artifact, expr.field);
         const target = expr.value;
-        const passed = expr.operator === "<=" ? fieldValue <= target : expr.operator === "<" ? fieldValue < target : fieldValue === target;
-        return { passed, expression: expr.field + " " + expr.operator + " " + expr.value, evaluated: expr, reason: passed ? "OK" : "Failed" };
+        if (fieldValue === undefined || fieldValue === null) {
+            return { passed: false, expression: `${expr.field} ${expr.operator} ${expr.value}`, evaluated: expr, reason: "Field missing" };
+        }
+        let passed = false;
+        if (expr.operator === "<=")
+            passed = Number(fieldValue) <= Number(target);
+        else if (expr.operator === ">=")
+            passed = Number(fieldValue) >= Number(target);
+        else if (expr.operator === "<")
+            passed = Number(fieldValue) < Number(target);
+        else if (expr.operator === ">")
+            passed = Number(fieldValue) > Number(target);
+        else if (expr.operator === "==")
+            passed = String(fieldValue) === String(target);
+        return { passed, expression: `${expr.field} ${expr.operator} ${expr.value}`, evaluated: expr, reason: passed ? "OK" : "Failed" };
     }
     evalStatus(expr, ctx) {
         if (!ctx.artifact)
@@ -55,6 +80,19 @@ export class GateParser {
         const status = ctx.artifact.status;
         const passed = expr.operator === "==" ? status === expr.value : status !== expr.value;
         return { passed, expression: expr.field + " " + expr.operator + " " + expr.value, evaluated: expr, reason: passed ? "OK" : "Mismatch" };
+    }
+    evalPresence(expr, ctx) {
+        if (!ctx.artifact)
+            return { passed: false, expression: "", evaluated: expr, reason: "No artifact" };
+        const payload = ctx.artifact.payload;
+        const fieldValue = this.resolveField(payload, ctx.artifact, expr.field);
+        const passed = fieldValue !== undefined && fieldValue !== null && String(fieldValue).trim().length > 0;
+        return {
+            passed,
+            expression: `${expr.field} ${expr.operator}`,
+            evaluated: expr,
+            reason: passed ? "OK" : "Field missing",
+        };
     }
     async evalCommand(expr, ctx) {
         if (!ctx.runCommand)
@@ -68,6 +106,20 @@ export class GateParser {
         const results = await Promise.all(expr.expressions.map(e => this.evaluate(e, ctx)));
         const passed = expr.connector === "and" ? results.every(r => r.passed) : results.some(r => r.passed);
         return { passed, expression: expr.connector ?? "and", evaluated: expr, reason: passed ? "All OK" : "Some failed" };
+    }
+    resolveField(payload, artifact, field) {
+        if (!field)
+            return undefined;
+        if (field.includes(".")) {
+            const [head, ...rest] = field.split(".");
+            const root = head in payload ? payload[head] : artifact[head];
+            return rest.reduce((acc, key) => {
+                if (acc && typeof acc === "object")
+                    return acc[key];
+                return undefined;
+            }, root);
+        }
+        return payload[field] ?? artifact[field];
     }
 }
 //# sourceMappingURL=GateParser.js.map

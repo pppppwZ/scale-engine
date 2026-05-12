@@ -18,10 +18,11 @@ export const BASIC_DEV: WorkflowPreset = {
   requiredArtifacts: [],
   steps: [
     { stepId: 'explore', action: 'explore', isMandatory: true, description: 'Read codebase, understand context' },
-    { stepId: 'create-spec', skillId: 'spec-creator', action: 'scale create Spec', isMandatory: true, description: 'Create specification artifact', verificationGate: 'ambiguity ≤ 0.2' },
+    { stepId: 'create-spec', skillId: 'spec-creator', action: 'scale create Spec', isMandatory: true, description: 'Create specification artifact' },
+    { stepId: 'refine-spec', action: 'scale transition SPEC-xxx refine', isMandatory: true, description: 'Refine spec before approval', verificationGate: 'ambiguityScore ≤ 0.2' },
     { stepId: 'approve-spec', action: 'scale transition SPEC-xxx approve', isMandatory: true, description: 'Approve spec after refinement', verificationGate: 'spec.status == FROZEN' },
     { stepId: 'create-plan', skillId: 'plan-designer', action: 'scale create Plan', isMandatory: true, description: 'Create implementation plan', verificationGate: 'rollbackStrategy present' },
-    { stepId: 'approve-plan', action: 'scale transition PLAN-xxx approve', isMandatory: true, description: 'Approve plan', verificationGate: 'plan.status == FROZEN' },
+    { stepId: 'approve-plan', action: 'scale transition PLAN-xxx review', isMandatory: true, description: 'Approve plan', verificationGate: 'plan.status == APPROVED' },
     { stepId: 'implement', action: 'implement', isMandatory: true, description: 'Write code per plan', verificationGate: 'build passes' },
     { stepId: 'verify', action: 'scale verify-task TASK-xxx', isMandatory: true, description: 'Run build/lint/test', verificationGate: 'all checks pass' },
     { stepId: 'complete', action: 'scale transition TASK-xxx complete', isMandatory: true, description: 'Mark task complete' },
