@@ -1050,12 +1050,13 @@ import * as phaseCommands from '../cli/phaseCommands.js'
 import * as liteCommands from '../cli/liteCommands.js'
 
 const main = defineCommand({
-  meta: { name: 'scale', version: '0.9.0', description: 'SCALE Engine v0.9.0 CLI — Phase Commands: define/plan/build/verify/review/ship · Lite Mode: scale lite · 11 agents · 10 workflows · 9 detectors' },
+  meta: { name: 'scale', version: '0.9.0', description: 'SCALE Engine v0.9.0 CLI — Phase Commands: start/define/plan/build/verify/review/ship · Lite Mode: scale lite · 11 agents · 10 workflows · 9 detectors' },
   subCommands: {
     // Lite Mode (agent-skills style interactive entry)
     lite: liteCommands.liteCommand,
 
     // Phase-Aligned Commands (agent-skills style)
+    start: phaseCommands.phaseStart,
     define: phaseCommands.phaseDefine,
     plan: phaseCommands.phasePlan,
     build: phaseCommands.phaseBuild,

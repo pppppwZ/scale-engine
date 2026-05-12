@@ -10,7 +10,9 @@ import { FSM } from '../artifact/fsm.js'
 import { registerAllFSMs } from '../artifact/fsmDefinitions.js'
 import { join } from 'node:path'
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import type { SpecPayload, PlanPayload, TaskPayload } from '../artifact/types.js'
+import type { Artifact, SpecPayload, PlanPayload, TaskPayload } from '../artifact/types.js'
+import { SkillRegistry } from '../skills/SkillRegistry.js'
+import { registerExternalSkills } from '../skills/ExternalSkills.js'
 
 const SCALE_DIR = process.env.SCALE_DIR ?? '.scale'
 
@@ -28,6 +30,78 @@ function getEngine() {
 
 function ensureDir(dir: string) {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+}
+
+function inferPlanTaskType(specTitle: string, specPayload: SpecPayload): string {
+  const haystack = `${specTitle} ${specPayload.what} ${specPayload.successCriteria.join(' ')}`.toLowerCase()
+  if (haystack.includes('diagram') || haystack.includes('architecture')) return 'architecture-diagram'
+  if (haystack.includes('ui') || haystack.includes('ux') || haystack.includes('design')) return 'ui-design'
+  if (haystack.includes('graph')) return 'knowledge-graph'
+  if (haystack.includes('e2e') || haystack.includes('playwright')) return 'e2e-testing'
+  if (haystack.includes('web') || haystack.includes('scrap')) return 'web-scraping'
+  return 'implementation'
+}
+
+function collectKeywords(specTitle: string, specPayload: SpecPayload): string[] {
+  const text = `${specTitle} ${specPayload.what} ${specPayload.successCriteria.join(' ')}`
+  return text
+    .split(/[^a-zA-Z0-9一-鿿]+/)
+    .map(word => word.trim())
+    .filter(word => word.length >= 2)
+    .slice(0, 20)
+}
+
+function getPlanSkillGuidance(specTitle: string, specPayload: SpecPayload) {
+  const eventBus = new EventBus()
+  const registry = new SkillRegistry(eventBus)
+  registerExternalSkills(registry, eventBus)
+
+  const context = {
+    taskType: inferPlanTaskType(specTitle, specPayload),
+    phase: 'plan' as const,
+    complexity: 'medium' as const,
+    keywords: collectKeywords(specTitle, specPayload),
+    artifactType: 'Plan',
+  }
+
+  const recommendedSkills = registry.recommend(context)
+    .map((recommendation) => {
+      const skill = registry.get(recommendation.skillId)
+      if (!skill) return null
+      return {
+        skillId: skill.id,
+        name: skill.name,
+        domain: skill.domain,
+        executionType: skill.execution.type,
+        reason: recommendation.reason,
+        installed: true as const,
+        advisoryOnly: skill.domain === 'planning' || skill.execution.type === 'skill-file',
+      }
+    })
+    .filter((skill): skill is NonNullable<typeof skill> => skill !== null)
+
+  const skillHints = registry.listAll()
+    .filter((skill) => !skill.installed)
+    .map((skill) => {
+      const { matched, score } = registry.evaluateTriggers(skill, context)
+      if (matched.length === 0 || score < 0.9) return null
+      return {
+        skillId: skill.id,
+        name: skill.name,
+        domain: skill.domain,
+        executionType: skill.execution.type,
+        reason: matched.length === 1
+          ? `${skill.name} 触发条件匹配: ${matched[0].type}`
+          : `${skill.name} 多条件匹配: ${matched.map((trigger) => trigger.type).join(', ')} (${matched.length} 个触发器)`,
+        source: skill.source,
+        installed: false as const,
+        advisoryOnly: true as const,
+      }
+    })
+    .filter((skill): skill is NonNullable<typeof skill> => skill !== null)
+    .slice(0, 5)
+
+  return { recommendedSkills, skillHints }
 }
 
 // Helper: Generate spec markdown file
@@ -68,6 +142,175 @@ function calculateAmbiguityScore(description: string, successCriteria: string[])
   return Math.max(0.05, score)
 }
 
+interface DefinePhaseInput {
+  title: string
+  description?: string
+  'success-criteria'?: string
+}
+
+interface PlanPhaseInput {
+  'spec-id': string
+  approach?: string
+  rollback?: string
+}
+
+interface BuildPhaseInput {
+  'plan-id': string
+  description?: string
+}
+
+interface StartPhaseInput {
+  title: string
+  description?: string
+  'success-criteria'?: string
+  approach?: string
+  rollback?: string
+  'task-description'?: string
+}
+
+async function runDefinePhase(args: DefinePhaseInput) {
+  const { store, fsm } = getEngine()
+  const desc = args.description ?? args.title
+
+  const successCriteria = args['success-criteria']
+    ? args['success-criteria'].split(',').map(s => s.trim()).filter(s => s)
+    : ['Feature works as described', 'No regression in existing functionality']
+
+  const ambiguityScore = calculateAmbiguityScore(desc, successCriteria)
+
+  const need = await store.create({
+    type: 'Need', title: args.title,
+    payload: { rawText: desc },
+    initialStatus: 'DRAFT',
+    createdBy: { kind: 'human', userId: 'cli' },
+  })
+
+  const specPayload: SpecPayload = {
+    what: desc,
+    successCriteria,
+    outOfScope: [],
+    edgeCases: [],
+    northStar: 'Deliver user value',
+    ambiguityScore,
+  }
+
+  const spec = await store.create({
+    type: 'Spec', title: args.title,
+    payload: specPayload,
+    parents: [need.id],
+    initialStatus: 'DRAFT',
+    createdBy: { kind: 'human', userId: 'cli' },
+  })
+
+  const specsDir = join(SCALE_DIR, 'specs')
+  ensureDir(specsDir)
+  const specPath = join(specsDir, `${spec.id}.md`)
+  writeFileSync(specPath, generateSpecMarkdown(spec.id, args.title, specPayload))
+
+  let transitionError: string | null = null
+  try {
+    await fsm.transition(spec.id, 'refine', { actor: { kind: 'system', component: 'phase-define' } })
+    await fsm.transition(spec.id, 'approve', { actor: { kind: 'system', component: 'phase-define' } })
+  } catch (e) {
+    transitionError = (e as Error).message
+  }
+
+  const finalSpec = (await store.get(spec.id)) ?? spec
+  return { need, spec: finalSpec, specPath, ambiguityScore, successCriteria, transitionError }
+}
+
+async function runPlanPhase(args: PlanPhaseInput) {
+  const { store, fsm } = getEngine()
+
+  const spec = await store.get(args['spec-id'])
+  if (!spec || spec.type !== 'Spec') {
+    throw new Error(`Spec not found: ${args['spec-id']}`)
+  }
+
+  const rollbackStrategy = args.rollback ?? 'Revert git commits and restore previous version'
+  const approach = args.approach ?? 'Standard implementation following spec requirements'
+  const specPayload = spec.payload as SpecPayload
+  const { recommendedSkills, skillHints } = getPlanSkillGuidance(spec.title, specPayload)
+
+  const planPayload: PlanPayload = {
+    approach,
+    techChoices: [],
+    modules: [],
+    rollbackStrategy,
+    estimatedComplexity: 5,
+    recommendedSkills,
+    skillHints,
+  }
+
+  const plan = await store.create({
+    type: 'Plan', title: `Plan for ${spec.title}`,
+    payload: planPayload,
+    parents: [args['spec-id']],
+    initialStatus: 'DRAFT',
+    createdBy: { kind: 'human', userId: 'cli' },
+  })
+
+  const plansDir = join(SCALE_DIR, 'plans')
+  ensureDir(plansDir)
+  const planPath = join(plansDir, `${plan.id}.md`)
+  writeFileSync(planPath, generatePlanMarkdown(plan.id, args['spec-id'], planPayload))
+
+  let transitionError: string | null = null
+  try {
+    await fsm.transition(plan.id, 'review', { actor: { kind: 'system', component: 'phase-plan' } })
+  } catch (e) {
+    transitionError = (e as Error).message
+  }
+
+  const finalPlan = (await store.get(plan.id)) ?? plan
+  return { plan: finalPlan, planPath, rollbackStrategy, recommendedSkills, transitionError }
+}
+
+async function runBuildPhase(args: BuildPhaseInput) {
+  const { store, fsm } = getEngine()
+
+  const plan = await store.get(args['plan-id'])
+  if (!plan || plan.type !== 'Plan') {
+    throw new Error(`Plan not found: ${args['plan-id']}`)
+  }
+
+  const taskPayload: TaskPayload = {
+    description: args.description ?? `Implement ${plan.title}`,
+    filesInvolved: [],
+    dependsOn: [],
+    requiredRole: 'implementer',
+    requiredCapabilities: ['code-generation', 'file-editing'],
+    buildStatus: 'pending',
+    lintStatus: 'pending',
+    testPassed: undefined,
+    testCoverage: undefined,
+  }
+
+  const task = await store.create({
+    type: 'Task', title: `Task for ${plan.title}`,
+    payload: taskPayload,
+    parents: [args['plan-id']],
+    initialStatus: 'PENDING',
+    createdBy: { kind: 'human', userId: 'cli' },
+  })
+
+  let transitionError: string | null = null
+  try {
+    await fsm.transition(task.id, 'schedule', { actor: { kind: 'system', component: 'phase-build' } })
+    await fsm.transition(task.id, 'start', { actor: { kind: 'human', userId: 'cli' } })
+  } catch (e) {
+    transitionError = (e as Error).message
+  }
+
+  try {
+    await fsm.transition(args['plan-id'], 'implement', { actor: { kind: 'system', component: 'phase-build' } })
+  } catch {}
+
+  const finalTask = (await store.get(task.id)) ?? task
+  const updatedPlan = (await store.get(args['plan-id'])) ?? plan
+  return { task: finalTask, plan: updatedPlan, status: 'RUNNING' as const, transitionError }
+}
+
 // DEFINE Phase
 export const phaseDefine = defineCommand({
   meta: { name: 'define', description: 'DEFINE: Create Spec (/spec)' },
@@ -78,67 +321,24 @@ export const phaseDefine = defineCommand({
     json: { type: 'boolean', default: false },
   },
   async run({ args }) {
-    const { store, fsm } = getEngine()
-    const desc = args.description ?? args.title
+    const result = await runDefinePhase(args as DefinePhaseInput)
+    if (result.transitionError && !args.json) console.log(`   ⚠️ FSM transition: ${result.transitionError}`)
 
-    // Parse success criteria
-    const successCriteria = args['success-criteria']
-      ? args['success-criteria'].split(',').map(s => s.trim()).filter(s => s)
-      : ['Feature works as described', 'No regression in existing functionality']
-
-    // Calculate ambiguity score
-    const ambiguityScore = calculateAmbiguityScore(desc, successCriteria)
-
-    // Create Need artifact
-    const need = await store.create({
-      type: 'Need', title: args.title,
-      payload: { rawText: desc },
-      initialStatus: 'DRAFT',
-      createdBy: { kind: 'human', userId: 'cli' },
-    })
-
-    // Create Spec artifact with proper payload
-    const specPayload: SpecPayload = {
-      what: desc,
-      successCriteria,
-      outOfScope: [],
-      edgeCases: [],
-      northStar: 'Deliver user value',
-      ambiguityScore,
+    const output = {
+      phase: 'DEFINE',
+      spec: result.spec,
+      specPath: result.specPath,
+      ambiguityScore: result.ambiguityScore,
+      successCriteria: result.successCriteria,
     }
 
-    const spec = await store.create({
-      type: 'Spec', title: args.title,
-      payload: specPayload,
-      parents: [need.id],
-      initialStatus: 'DRAFT',
-      createdBy: { kind: 'human', userId: 'cli' },
-    })
-
-    // Generate spec markdown file
-    const specsDir = join(SCALE_DIR, 'specs')
-    ensureDir(specsDir)
-    const specPath = join(specsDir, `${spec.id}.md`)
-    writeFileSync(specPath, generateSpecMarkdown(spec.id, args.title, specPayload))
-
-    // FSM transitions: DRAFT -> REVIEWING -> FROZEN
-    try {
-      await fsm.transition(spec.id, 'refine', { actor: { kind: 'system', component: 'phase-define' } })
-      await fsm.transition(spec.id, 'approve', { actor: { kind: 'system', component: 'phase-define' } })
-    } catch (e) {
-      // Guard may fail - report reason
-      const error = e as Error
-      if (!args.json) console.log(`   ⚠️ FSM transition: ${error.message}`)
-    }
-
-    const result = { phase: 'DEFINE', spec, specPath, ambiguityScore, successCriteria }
-    if (args.json) console.log(JSON.stringify(result, null, 2))
+    if (args.json) console.log(JSON.stringify(output, null, 2))
     else {
-      console.log(`\n✅ DEFINE: ${spec.id}`)
-      console.log(`   Spec file: ${specPath}`)
-      console.log(`   Ambiguity score: ${ambiguityScore.toFixed(2)}`)
-      console.log(`   Success criteria: ${successCriteria.length}`)
-      console.log(`\n   Next: scale plan ${spec.id}\n`)
+      console.log(`\n✅ DEFINE: ${result.spec.id}`)
+      console.log(`   Spec file: ${result.specPath}`)
+      console.log(`   Ambiguity score: ${result.ambiguityScore.toFixed(2)}`)
+      console.log(`   Success criteria: ${result.successCriteria.length}`)
+      console.log(`\n   Next: scale plan ${result.spec.id}\n`)
     }
   },
 })
@@ -165,6 +365,16 @@ ${payload.rollbackStrategy}
 ## Estimated Complexity
 ${payload.estimatedComplexity ?? 5}/10
 
+## Recommended Skills
+${payload.recommendedSkills && payload.recommendedSkills.length > 0
+  ? payload.recommendedSkills.map(skill => `- **${skill.name}** (\`${skill.skillId}\`, ${skill.domain}, ${skill.executionType})${skill.advisoryOnly ? ' [advisory]' : ''}: ${skill.reason}`).join('\n')
+  : '(none recommended)'}
+
+## Skill Hints
+${payload.skillHints && payload.skillHints.length > 0
+  ? payload.skillHints.map(skill => `- **${skill.name}** (\`${skill.skillId}\`, ${skill.domain}, ${skill.executionType}) [install hint]: ${skill.reason}${skill.source ? `. Source: ${skill.source}` : ''}`).join('\n')
+  : '(none)' }
+
 ---
 *Generated by SCALE Engine PLAN phase*
 `
@@ -180,57 +390,77 @@ export const phasePlan = defineCommand({
     json: { type: 'boolean', default: false },
   },
   async run({ args }) {
-    const { store, fsm } = getEngine()
+    try {
+      const result = await runPlanPhase(args as PlanPhaseInput)
+      if (result.transitionError && !args.json) console.log(`   ⚠️ FSM transition: ${result.transitionError}`)
 
-    // Validate spec exists
-    const spec = await store.get(args['spec-id'])
-    if (!spec || spec.type !== 'Spec') {
-      console.error(`\n❌ Spec not found: ${args['spec-id']}\n`)
+      const output = {
+        phase: 'PLAN',
+        plan: result.plan,
+        planPath: result.planPath,
+        rollbackStrategy: result.rollbackStrategy,
+        recommendedSkills: result.recommendedSkills,
+      }
+
+      if (args.json) console.log(JSON.stringify(output, null, 2))
+      else {
+        console.log(`\n✅ PLAN: ${result.plan.id}`)
+        console.log(`   Plan file: ${result.planPath}`)
+        console.log(`   Rollback: ${result.rollbackStrategy}`)
+        console.log(`\n   Next: scale build ${result.plan.id}\n`)
+      }
+    } catch (error) {
+      console.error(`\n❌ ${(error as Error).message}\n`)
       process.exit(1)
     }
+  },
+})
 
-    // Default rollback strategy (FSM guard requires this)
-    const rollbackStrategy = args.rollback ?? 'Revert git commits and restore previous version'
-    const approach = args.approach ?? 'Standard implementation following spec requirements'
-
-    // Create PlanPayload with rollback strategy
-    const planPayload: PlanPayload = {
-      approach,
-      techChoices: [],
-      modules: [],
-      rollbackStrategy,
-      estimatedComplexity: 5,
-    }
-
-    const plan = await store.create({
-      type: 'Plan', title: `Plan for ${spec.title}`,
-      payload: planPayload,
-      parents: [args['spec-id']],
-      initialStatus: 'DRAFT',
-      createdBy: { kind: 'human', userId: 'cli' },
+// START Phase
+export const phaseStart = defineCommand({
+  meta: { name: 'start', description: 'START: Route generic coding work through DEFINE -> PLAN -> BUILD' },
+  args: {
+    title: { type: 'positional', required: true },
+    description: { type: 'string', alias: 'd' },
+    'success-criteria': { type: 'string', alias: 'c', description: 'Comma-separated criteria' },
+    approach: { type: 'string', alias: 'a', description: 'Implementation approach' },
+    rollback: { type: 'string', alias: 'r', description: 'Rollback strategy' },
+    'task-description': { type: 'string', description: 'Task description' },
+    json: { type: 'boolean', default: false },
+  },
+  async run({ args }) {
+    const defineResult = await runDefinePhase(args as StartPhaseInput)
+    const planResult = await runPlanPhase({
+      'spec-id': defineResult.spec.id,
+      approach: args.approach,
+      rollback: args.rollback,
+    })
+    const buildResult = await runBuildPhase({
+      'plan-id': planResult.plan.id,
+      description: args['task-description'],
     })
 
-    // Generate plan markdown file
-    const plansDir = join(SCALE_DIR, 'plans')
-    ensureDir(plansDir)
-    const planPath = join(plansDir, `${plan.id}.md`)
-    writeFileSync(planPath, generatePlanMarkdown(plan.id, args['spec-id'], planPayload))
-
-    // FSM transition: DRAFT -> APPROVED (requires rollbackStrategy)
-    try {
-      await fsm.transition(plan.id, 'review', { actor: { kind: 'system', component: 'phase-plan' } })
-    } catch (e) {
-      const error = e as Error
-      if (!args.json) console.log(`   ⚠️ FSM transition: ${error.message}`)
+    if (!args.json) {
+      if (defineResult.transitionError) console.log(`   ⚠️ DEFINE FSM transition: ${defineResult.transitionError}`)
+      if (planResult.transitionError) console.log(`   ⚠️ PLAN FSM transition: ${planResult.transitionError}`)
+      if (buildResult.transitionError) console.log(`   ⚠️ BUILD FSM transition: ${buildResult.transitionError}`)
     }
 
-    const result = { phase: 'PLAN', plan, planPath, rollbackStrategy }
-    if (args.json) console.log(JSON.stringify(result, null, 2))
+    const output = {
+      phase: 'START',
+      specId: defineResult.spec.id,
+      planId: planResult.plan.id,
+      taskId: buildResult.task.id,
+      next: `Implement now, then run: scale verify ${buildResult.task.id}`,
+    }
+
+    if (args.json) console.log(JSON.stringify(output, null, 2))
     else {
-      console.log(`\n✅ PLAN: ${plan.id}`)
-      console.log(`   Plan file: ${planPath}`)
-      console.log(`   Rollback: ${rollbackStrategy}`)
-      console.log(`\n   Next: scale build ${plan.id}\n`)
+      console.log(`\n✅ START: ${args.title}`)
+      console.log(`   Spec: ${defineResult.spec.id}`)
+      console.log(`   Plan: ${planResult.plan.id}`)
+      console.log(`   Task: ${buildResult.task.id}`)
+      console.log(`\n   Next: scale verify ${buildResult.task.id}\n`)
     }
   },
 })
@@ -244,58 +474,22 @@ export const phaseBuild = defineCommand({
     json: { type: 'boolean', default: false },
   },
   async run({ args }) {
-    const { store, fsm } = getEngine()
+    try {
+      const result = await runBuildPhase(args as BuildPhaseInput)
+      if (result.transitionError && !args.json) console.log(`   ⚠️ FSM transition: ${result.transitionError}`)
 
-    // Validate plan exists
-    const plan = await store.get(args['plan-id'])
-    if (!plan || plan.type !== 'Plan') {
-      console.error(`\n❌ Plan not found: ${args['plan-id']}\n`)
+      const output = { phase: 'BUILD', task: result.task, status: result.status }
+      if (args.json) console.log(JSON.stringify(output, null, 2))
+      else {
+        const payload = result.task.payload as TaskPayload
+        console.log(`\n✅ BUILD: ${result.task.id}`)
+        console.log(`   Status: ${result.status} (ready to implement)`)
+        console.log(`   Description: ${payload.description}`)
+        console.log(`\n   Implement now, then run: scale verify ${result.task.id}\n`)
+      }
+    } catch (error) {
+      console.error(`\n❌ ${(error as Error).message}\n`)
       process.exit(1)
-    }
-
-    // Create TaskPayload
-    const taskPayload: TaskPayload = {
-      description: args.description ?? `Implement ${plan.title}`,
-      filesInvolved: [],
-      dependsOn: [],
-      requiredRole: 'implementer',
-      requiredCapabilities: ['code-generation', 'file-editing'],
-      // Initialize quality metrics (FSM guards require these for completion)
-      buildStatus: 'pending',
-      lintStatus: 'pending',
-      testPassed: undefined,
-      testCoverage: undefined,
-    }
-
-    const task = await store.create({
-      type: 'Task', title: `Task for ${plan.title}`,
-      payload: taskPayload,
-      parents: [args['plan-id']],
-      initialStatus: 'PENDING',
-      createdBy: { kind: 'human', userId: 'cli' },
-    })
-
-    // FSM transitions: PENDING -> READY -> RUNNING
-    try {
-      await fsm.transition(task.id, 'schedule', { actor: { kind: 'system', component: 'phase-build' } })
-      await fsm.transition(task.id, 'start', { actor: { kind: 'human', userId: 'cli' } })
-    } catch (e) {
-      const error = e as Error
-      if (!args.json) console.log(`   ⚠️ FSM transition: ${error.message}`)
-    }
-
-    // Update Plan status to IMPLEMENTING
-    try {
-      await fsm.transition(args['plan-id'], 'implement', { actor: { kind: 'system', component: 'phase-build' } })
-    } catch {}
-
-    const result = { phase: 'BUILD', task, status: 'RUNNING' }
-    if (args.json) console.log(JSON.stringify(result, null, 2))
-    else {
-      console.log(`\n✅ BUILD: ${task.id}`)
-      console.log(`   Status: RUNNING (ready to implement)`)
-      console.log(`   Description: ${taskPayload.description}`)
-      console.log(`\n   Implement now, then run: scale verify ${task.id}\n`)
     }
   },
 })

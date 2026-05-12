@@ -53,17 +53,18 @@ describe('SessionStart Hook Integration', () => {
       const settings = adapter.generateSettings()
 
       expect(settings.hooks?.SessionStart).toBeDefined()
-      expect(settings.hooks?.SessionStart?.length).toBeGreaterThan(0)
-      expect(settings.hooks?.SessionStart[0].command).toContain('scale context inject')
-      expect(settings.hooks?.SessionStart[0].command).toContain('--session-id')
+      expect(settings.hooks?.SessionStart?.length).toBeGreaterThan(1)
+      expect(settings.hooks?.SessionStart?.[0].command).toContain('scale session start')
+      expect(settings.hooks?.SessionStart?.[1].command).toContain('scale context inject')
+      expect(settings.hooks?.SessionStart?.[0].command).toContain('--session-id')
     })
 
     it('hook command includes session-id placeholder', () => {
       const adapter = new ClaudeCodeAdapter()
       const settings = adapter.generateSettings()
 
-      const hookCmd = settings.hooks?.SessionStart[0].command
-      expect(hookCmd).toContain('$CLAUDE_SESSION_ID')
+      const hookCmds = settings.hooks?.SessionStart?.map(entry => entry.command) ?? []
+      expect(hookCmds.every(command => command.includes('$CLAUDE_SESSION_ID'))).toBe(true)
     })
   })
 

@@ -43,7 +43,7 @@ describe('ClaudeCodeAdapter', () => {
   it('generateSettings produces valid hook config', () => {
     const settings = adapter.generateSettings()
     expect(settings.hooks).toBeDefined()
-    expect(settings.hooks!.SessionStart).toHaveLength(1)
+    expect(settings.hooks!.SessionStart).toHaveLength(2)
     expect(settings.hooks!.PreToolUse).toHaveLength(2)
     expect(settings.hooks!.PostToolUse).toHaveLength(2)
     expect(settings.hooks!.Stop).toHaveLength(1)
@@ -79,6 +79,21 @@ describe('ClaudeCodeAdapter', () => {
     // Custom permissions preserved
     expect(merged.permissions!.allow).toContain('Bash(npm:*)')
     expect(merged.permissions!.allow).toContain('Bash(scale:*)')
+  })
+
+  it('mergeSettings adds missing session start hook to existing SCALE installs', () => {
+    const existing = {
+      hooks: {
+        SessionStart: [
+          { matcher: '', command: 'scale context inject --session-id $CLAUDE_SESSION_ID' },
+        ],
+      },
+    }
+
+    const merged = adapter.mergeSettings(existing)
+    expect(merged.hooks!.SessionStart).toHaveLength(2)
+    expect(merged.hooks!.SessionStart.some((entry) => entry.command.includes('scale session start'))).toBe(true)
+    expect(merged.hooks!.SessionStart.some((entry) => entry.command.includes('scale context inject'))).toBe(true)
   })
 
   it('generateKnowledgeDoc includes project name', () => {

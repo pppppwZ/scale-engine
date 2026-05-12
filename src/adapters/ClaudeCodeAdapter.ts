@@ -95,6 +95,7 @@ export class ClaudeCodeAdapter implements IAgentAdapter {
     return {
       hooks: {
         SessionStart: [
+          { matcher: '', command: 'scale session start --session-id $CLAUDE_SESSION_ID' },
           { matcher: '', command: 'scale context inject --session-id $CLAUDE_SESSION_ID' },
         ],
         PreToolUse: [
@@ -128,7 +129,7 @@ export class ClaudeCodeAdapter implements IAgentAdapter {
       if (!merged.hooks[hookType]) merged.hooks[hookType] = []
       for (const entry of entries) {
         const alreadyExists = merged.hooks[hookType].some(
-          (e) => e.command.includes('scale '),
+          (e) => e.command === entry.command && e.matcher === entry.matcher,
         )
         if (!alreadyExists) {
           merged.hooks[hookType].push(entry)

@@ -167,6 +167,25 @@ export interface PlanPayload {
   }>
   rollbackStrategy: string
   estimatedComplexity: number
+  recommendedSkills?: Array<{
+    skillId: string
+    name: string
+    domain: string
+    executionType: string
+    reason: string
+    installed: true
+    advisoryOnly: boolean
+  }>
+  skillHints?: Array<{
+    skillId: string
+    name: string
+    domain: string
+    executionType: string
+    reason: string
+    source?: string
+    installed: false
+    advisoryOnly: true
+  }>
 }
 
 /** TestPlan —— 验证方案 */

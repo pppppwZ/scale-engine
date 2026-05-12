@@ -17,8 +17,13 @@ export interface SkillExecutionResult {
   durationMs: number
 }
 
+export interface SkillExecutionContext {
+  phase?: 'explore' | 'plan' | 'implement' | 'verify' | 'evolve'
+  allowAdvisoryPlanningSkills?: boolean
+}
+
 export interface ISkillExecutor {
-  execute(skillId: string, input: Record<string, unknown>): Promise<SkillExecutionResult>
+  execute(skillId: string, input: Record<string, unknown>, context?: SkillExecutionContext): Promise<SkillExecutionResult>
   executeCliCommand(command: string, _parameters: Record<string, unknown>): Promise<SkillExecutionResult>
   executeBuiltinFunction(functionName: string, input: Record<string, unknown>): Promise<SkillExecutionResult>
   registerBuiltinFunction(name: string, fn: (input: Record<string, unknown>) => Promise<unknown>): void
@@ -37,10 +42,16 @@ export class SkillExecutor implements ISkillExecutor {
     this.registerDefaultBuiltinFunctions()
   }
 
-  async execute(skillId: string, input: Record<string, unknown>): Promise<SkillExecutionResult> {
+  async execute(skillId: string, input: Record<string, unknown>, context: SkillExecutionContext = {}): Promise<SkillExecutionResult> {
     const skill = this.skillRegistry.get(skillId)
     if (!skill) return { skillId, type: "builtin-function", success: false, error: "Skill not found", durationMs: 0 }
     const start = Date.now()
+
+    const phaseError = this.validateExecutionPhase(skill.domain, skill.execution.type, context)
+    if (phaseError) {
+      return { skillId, type: skill.execution.type, success: false, error: phaseError, durationMs: Date.now() - start }
+    }
+
     try {
       let result: SkillExecutionResult
       switch (skill.execution.type) {
@@ -154,6 +165,24 @@ export class SkillExecutor implements ISkillExecutor {
     if (toolName.includes('type')) return 'type'
     if (toolName.includes('scroll')) return 'scroll'
     return 'click'
+  }
+
+  private validateExecutionPhase(
+    domain: 'context' | 'planning' | 'execution' | 'verification' | 'evolution' | 'deployment',
+    executionType: SkillExecutionType,
+    context: SkillExecutionContext
+  ): string | null {
+    if (!context.phase) return null
+    if (domain === 'planning' && context.phase !== 'plan') {
+      return `Planning skill execution is only allowed during plan phase (current: ${context.phase})`
+    }
+    if (domain === 'execution' && context.phase === 'plan') {
+      return 'Execution skills cannot run during plan phase before SCALE implementation starts'
+    }
+    if (executionType === 'skill-file' && domain === 'planning' && !context.allowAdvisoryPlanningSkills) {
+      return 'Planning skill files are advisory-only unless explicitly allowed by SCALE planning'
+    }
+    return null
   }
 
   private registerDefaultBuiltinFunctions(): void {
