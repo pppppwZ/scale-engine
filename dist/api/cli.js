@@ -59,6 +59,15 @@ function createEngine() {
     const fsmAgentBridge = new FSMAgentBridge(fsm, store);
     return { eventBus, store, fsm, gateway, roleGate, kb, ctx, fsmAgentBridge };
 }
+function readStdin() {
+    return new Promise((resolve, reject) => {
+        let data = '';
+        process.stdin.setEncoding('utf8');
+        process.stdin.on('data', chunk => { data += chunk; });
+        process.stdin.on('end', () => resolve(data));
+        process.stdin.on('error', reject);
+    });
+}
 // ============================================================================
 // session commands
 // ============================================================================
@@ -104,13 +113,19 @@ const gatePreTool = defineCommand({
     args: {
         tool: { type: 'positional', required: true },
         'args-json': { type: 'string', default: '{}' },
+        'args-stdin': { type: 'boolean', default: false },
         'session-id': { type: 'string', required: true },
     },
     async run({ args }) {
         const { gateway } = getEngine();
         let toolArgs = {};
         try {
-            toolArgs = JSON.parse(args['args-json']);
+            if (args['args-stdin']) {
+                toolArgs = JSON.parse(await readStdin());
+            }
+            else {
+                toolArgs = JSON.parse(args['args-json']);
+            }
         }
         catch { /* empty */ }
         const decision = await gateway.preTool({
@@ -134,14 +149,23 @@ const gatePostTool = defineCommand({
         tool: { type: 'positional', required: true },
         'args-json': { type: 'string', default: '{}' },
         'output-json': { type: 'string', default: '' },
+        'payload-stdin': { type: 'boolean', default: false },
         'exit-code': { type: 'string', default: '0' },
         'session-id': { type: 'string', required: true },
     },
     async run({ args }) {
         const { gateway } = getEngine();
         let toolArgs = {};
+        let output = args['output-json'];
         try {
-            toolArgs = JSON.parse(args['args-json']);
+            if (args['payload-stdin']) {
+                const payload = JSON.parse(await readStdin());
+                toolArgs = payload.args || {};
+                output = payload.output || '';
+            }
+            else {
+                toolArgs = JSON.parse(args['args-json']);
+            }
         }
         catch { /* empty */ }
         await gateway.postTool({
@@ -149,7 +173,7 @@ const gatePostTool = defineCommand({
             tool: args.tool,
             args: toolArgs,
             exitCode: parseInt(args['exit-code'], 10),
-            output: args['output-json'],
+            output,
         });
         // 静默（不消耗 token）
     },
